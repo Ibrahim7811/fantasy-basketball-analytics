@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
-CS50P_video_title_slide_clean.png
+CS50P_Title_Card.png
+Screenshot *.png
+Misc/*.mov
+Misc/*.png
