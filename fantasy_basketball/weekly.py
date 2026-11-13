@@ -1,6 +1,6 @@
 from datetime import date, timedelta
-from player_class import Player
-from lineup import build_optimal_lineup, lineup_total
+from fantasy_basketball.player_class import Player
+from fantasy_basketball.lineup import build_optimal_lineup, lineup_total
 
 
 def optimize_week(players: list[Player], start_date: str, end_date: str, lineup_slots: list[str]) -> tuple[dict, float]:

@@ -1,4 +1,4 @@
-from player_class import Player
+from fantasy_basketball.player_class import Player
 import csv
 from math import isfinite
 def load_players(filename: str) -> list[Player]:

@@ -1,6 +1,6 @@
 import pytest
-from player_class import Player
-from lineup import build_greedy_lineup, lineup_total, build_optimal_lineup
+from fantasy_basketball.player_class import Player
+from fantasy_basketball.lineup import build_greedy_lineup, build_optimal_lineup, lineup_total
 
 @pytest.fixture
 def sample_roster():

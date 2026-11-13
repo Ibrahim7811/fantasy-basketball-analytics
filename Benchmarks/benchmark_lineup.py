@@ -1,6 +1,6 @@
 import time
-from player_class import Player
-from lineup import build_optimal_lineup, lineup_total
+from fantasy_basketball.player_class import Player
+from fantasy_basketball.lineup import build_optimal_lineup, lineup_total
 
 if __name__ == "__main__":
 

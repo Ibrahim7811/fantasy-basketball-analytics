@@ -1,8 +1,8 @@
 import argparse
 from datetime import date
-from data_loader import load_players
-from matchup import analyze_matchup
-from report import format_matchup_report
+from fantasy_basketball.data_loader import load_players
+from fantasy_basketball.matchup import analyze_matchup
+from fantasy_basketball.report import format_matchup_report
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Fantasy Basketball Head-to-Head Matchup Analyzer")

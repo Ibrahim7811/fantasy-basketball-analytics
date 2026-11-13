@@ -1,4 +1,4 @@
-from player_class import Player
+from fantasy_basketball.player_class import Player
 
 nikola_jokic = Player('Nikola Jokić',['C'],58.5,["2026-11-03", "2026-11-05"],'DEN')
 cade_cunningham = Player('Cade Cunningham',['PG','SG'],48.25,["2026-11-04", "2026-11-07"],'DET')

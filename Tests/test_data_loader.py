@@ -1,8 +1,6 @@
-
 import pytest
-
-from player_class import Player
-from data_loader import load_players
+from fantasy_basketball.player_class import Player
+from fantasy_basketball.data_loader import load_players
 
 
 def test_load_players(tmp_path):

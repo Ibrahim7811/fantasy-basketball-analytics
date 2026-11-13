@@ -1,6 +1,6 @@
 import pytest
-from data_loader import load_players
-from lineup import build_optimal_lineup, lineup_total
+from fantasy_basketball.data_loader import load_players
+from fantasy_basketball.lineup import build_optimal_lineup, lineup_total
 
 
 def test_csv_to_optimal_lineup(tmp_path):

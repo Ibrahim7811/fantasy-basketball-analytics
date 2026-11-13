@@ -1,5 +1,5 @@
-from data_loader import load_players
-from lineup import build_optimal_lineup, lineup_total
+from fantasy_basketball.data_loader import load_players
+from fantasy_basketball.lineup import build_optimal_lineup, lineup_total
 
 def main():
     date = "2026-11-09"

@@ -1,5 +1,4 @@
-
-from report import format_matchup_report
+from fantasy_basketball.report import format_matchup_report
 import pytest
 
 

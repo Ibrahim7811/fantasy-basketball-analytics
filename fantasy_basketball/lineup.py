@@ -1,4 +1,4 @@
-from player_class import Player
+from fantasy_basketball.player_class import Player
 
 def build_greedy_lineup(players: list[Player], date: str, lineup_slots: list[str]) -> dict:
     sorted_eligible_players = sorted(players,key=lambda player: player._projected_points,reverse=True)

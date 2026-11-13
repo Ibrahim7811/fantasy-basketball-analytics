@@ -1,4 +1,3 @@
-
 import sys
 import pytest
 from project import parse_arguments, main, parse_lineup_slots, validate_date_range

@@ -1,8 +1,6 @@
-
 import pytest
-
-from player_class import Player
-from matchup import analyze_matchup
+from fantasy_basketball.player_class import Player
+from fantasy_basketball.matchup import analyze_matchup
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,5 @@
 import pytest
-from nba_data import get_player_id
+from fantasy_basketball.nba_data import get_player_id
 
 def test_get_player_id():
     player_id = get_player_id("Nikola Jokic")

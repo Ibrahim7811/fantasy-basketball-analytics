@@ -1,5 +1,5 @@
-from player_class import Player
-from weekly import optimize_week
+from fantasy_basketball.player_class import Player
+from fantasy_basketball.weekly import optimize_week
 
 
 def analyze_matchup(team_a: list[Player], team_b: list[Player], start_date: str, end_date: str, lineup_slots: list[str]) -> dict:
