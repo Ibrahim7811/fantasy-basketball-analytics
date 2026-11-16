@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from fantasy_basketball.data_processing import clean_game_logs, calculate_fantasy_points, add_rolling_averages
+from fantasy_basketball.data_processing import clean_game_logs, calculate_fantasy_points, add_rolling_averages, add_rest_days, prepare_game_logs
 
 @pytest.fixture
 def sample_logs():
@@ -128,3 +128,81 @@ def test_rolling_averages_preserve_original():
     pd.testing.assert_frame_equal(df, original)
     pd.testing.assert_frame_equal(result[df.columns], original)
     assert result is not df
+
+def test_calculates_rest_days():
+    df = pd.DataFrame({
+        "GAME_DATE": pd.to_datetime([
+            "2026-11-01",
+            "2026-11-02",
+            "2026-11-05",
+            "2026-11-07",
+        ]),
+    })
+
+    result = add_rest_days(df)
+
+    expected = pd.Series(
+        [float("nan"), 0.0, 2.0, 1.0],
+        name="REST_DAYS",
+    )
+
+    pd.testing.assert_series_equal(result["REST_DAYS"], expected)
+
+def test_rest_days_preserve_original():
+    df = pd.DataFrame(
+        {
+            "GAME_DATE": pd.to_datetime([
+                "2026-11-01",
+                "2026-11-03",
+            ]),
+            "FANTASY_POINTS": [20, 30],
+        },
+        index=[8, 3],
+    )
+    original = df.copy(deep=True)
+
+    result = add_rest_days(df)
+
+    pd.testing.assert_frame_equal(df, original)
+    pd.testing.assert_frame_equal(result[df.columns], original)
+    assert result is not df
+
+def test_prepare_game_logs_pipeline():
+    df = pd.DataFrame(
+        {
+            "GAME_DATE": [
+                "Nov 07, 2026",
+                "Nov 01, 2026",
+                "Nov 05, 2026",
+                "Nov 02, 2026",
+            ],
+            "PTS": [50, 20, 40, 30],
+            "TOV": [4, 1, 3, 2],
+        },
+        index=[8, 3, 6, 2],
+    )
+    original = df.copy(deep=True)
+
+    result = prepare_game_logs(
+        df,
+        scoring_weights={"PTS": 1.0, "TOV": -1.0},
+        windows=(2,),
+    )
+
+    nan = float("nan")
+    expected = pd.DataFrame({
+        "GAME_DATE": pd.to_datetime([
+            "2026-11-01",
+            "2026-11-02",
+            "2026-11-05",
+            "2026-11-07",
+        ]),
+        "PTS": [20, 30, 40, 50],
+        "TOV": [1, 2, 3, 4],
+        "FANTASY_POINTS": [19.0, 28.0, 37.0, 46.0],
+        "FP_AVG_2": [nan, 19.0, 23.5, 32.5],
+        "REST_DAYS": [nan, 0.0, 2.0, 1.0],
+    })
+
+    pd.testing.assert_frame_equal(result, expected)
+    pd.testing.assert_frame_equal(df, original)
