@@ -24,5 +24,5 @@ if __name__ == "__main__":
     player_id = get_player_id("Nikola Jokic")
     df = get_player_game_logs(player_id, "2025-26")
 
-    print(df[["GAME_DATE", "PTS", "REB", "AST"]].head())
+    print(df[["GAME_DATE", "PTS", "REB", "AST", "STL", "BLK", "TOV"]].head())
     print(f"Total games: {len(df)}")
