@@ -30,3 +30,25 @@ def add_rest_days(df: pd.DataFrame) -> pd.DataFrame:
 def prepare_game_logs(df: pd.DataFrame, scoring_weights: dict[str, float], windows: tuple[int, ...] = (5, 10),) -> pd.DataFrame:
     prepped_df = add_rest_days(add_rolling_averages(calculate_fantasy_points(clean_game_logs(df),scoring_weights),windows))
     return prepped_df
+
+def normalize_schedule(df: pd.DataFrame,team_lookup: dict[str, int],) -> pd.DataFrame:
+    column_mapping = {
+        "gameId": "GAME_ID",
+        "gameDate": "GAME_DATE",
+        "homeTeam_teamId": "HOME_TEAM_ID",
+        "awayTeam_teamId": "AWAY_TEAM_ID",}
+
+    if df.empty:
+        empty_df = pd.DataFrame(columns=list(column_mapping.values()))
+        empty_df["GAME_DATE"] = pd.to_datetime(empty_df["GAME_DATE"])
+        return empty_df
+
+    schedule_df = df[list(column_mapping)].copy()
+    schedule_df = schedule_df.rename(columns=column_mapping)
+    valid_games = (
+        schedule_df["GAME_ID"].str.startswith("002", na=False)
+        & schedule_df["HOME_TEAM_ID"].isin(team_lookup.values())
+        & schedule_df["AWAY_TEAM_ID"].isin(team_lookup.values()))
+    schedule_df = schedule_df.loc[valid_games].copy()
+    schedule_df["GAME_DATE"] = pd.to_datetime(schedule_df["GAME_DATE"],format="%m/%d/%Y %H:%M:%S",)
+    return (schedule_df.sort_values(["GAME_DATE", "GAME_ID"]).reset_index(drop=True))

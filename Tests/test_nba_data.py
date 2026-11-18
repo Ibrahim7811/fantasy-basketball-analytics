@@ -105,3 +105,57 @@ def test_get_player_game_logs_empty(monkeypatch):
     assert isinstance(result, pd.DataFrame)
     assert result.empty
 
+@pytest.fixture
+def mocked_schedule(monkeypatch):
+    endpoint = MagicMock()
+    constructor = MagicMock(return_value=endpoint)
+
+    monkeypatch.setattr(
+        nba_data.scheduleleaguev2,
+        "ScheduleLeagueV2",
+        constructor,
+    )
+
+    return constructor, endpoint
+
+def test_get_season_schedule_returns_data(mocked_schedule):
+    constructor, endpoint = mocked_schedule
+    expected = pd.DataFrame({
+        "gameId": ["0001"],
+        "gameDate": ["11/01/2025 00:00:00"],
+        "homeTeam_teamId": [1],
+        "awayTeam_teamId": [2],
+    })
+    endpoint.season_games.get_data_frame.return_value = expected
+
+    result = nba_data.get_season_schedule("2025-26")
+
+    pd.testing.assert_frame_equal(result, expected)
+    constructor.assert_called_once_with(
+        league_id="00",
+        season="2025-26",
+        timeout=10,
+    )
+
+def test_get_season_schedule_handles_empty_results(mocked_schedule):
+    _, endpoint = mocked_schedule
+    expected = pd.DataFrame()
+    endpoint.season_games.get_data_frame.return_value = expected
+
+    result = nba_data.get_season_schedule("2025-26")
+
+    pd.testing.assert_frame_equal(result, expected)
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
+    ],
+)
+def test_get_season_schedule_propagates_errors(mocked_schedule, error_type):
+    constructor, _ = mocked_schedule
+    constructor.side_effect = error_type("Request failed")
+
+    with pytest.raises(error_type, match="Request failed"):
+        nba_data.get_season_schedule("2025-26")

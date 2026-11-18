@@ -1,7 +1,9 @@
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelog
+from nba_api.stats.endpoints import scheduleleaguev2
 import requests
 import pandas as pd
+
 
 def get_player_id(player_name: str) -> int:
     player_list = players.find_players_by_full_name(player_name)
@@ -26,3 +28,8 @@ if __name__ == "__main__":
 
     print(df[["GAME_DATE", "PTS", "REB", "AST", "STL", "BLK", "TOV"]].head())
     print(f"Total games: {len(df)}")
+
+def get_season_schedule(season: str) -> pd.DataFrame:
+    schedule = scheduleleaguev2.ScheduleLeagueV2(league_id="00",season=season,timeout=10,)
+    schedule_df = schedule.season_games.get_data_frame()
+    return schedule_df

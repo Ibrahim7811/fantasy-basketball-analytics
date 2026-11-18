@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from fantasy_basketball.data_processing import clean_game_logs, calculate_fantasy_points, add_rolling_averages, add_rest_days, prepare_game_logs
+from fantasy_basketball.data_processing import clean_game_logs, calculate_fantasy_points, add_rolling_averages, add_rest_days, prepare_game_logs, normalize_schedule
 
 @pytest.fixture
 def sample_logs():
@@ -206,3 +206,77 @@ def test_prepare_game_logs_pipeline():
 
     pd.testing.assert_frame_equal(result, expected)
     pd.testing.assert_frame_equal(df, original)
+
+@pytest.fixture
+def raw_schedule():
+    df = pd.DataFrame(
+        [
+            ("0022500003", "11/05/2025 00:00:00", 1, 2),
+            ("0012500001", "10/02/2025 00:00:00", 1, 2),
+            ("0022500002", "11/01/2025 00:00:00", 2, 1),
+            ("0022500001", "11/01/2025 00:00:00", 1, 2),
+            ("0022500004", "11/06/2025 00:00:00", 999, 2),
+            ("0022500005", "11/07/2025 00:00:00", 1, 0),
+        ],
+        columns=[
+            "gameId",
+            "gameDate",
+            "homeTeam_teamId",
+            "awayTeam_teamId",
+        ],
+        index=[8, 3, 6, 2, 9, 5],
+    )
+    df["gameStatus"] = 3
+    return df
+
+@pytest.fixture
+def schedule_team_lookup():
+    return {"HOM": 1, "AWY": 2}
+
+def test_normalize_schedule_filters_sorts_and_renames(raw_schedule, schedule_team_lookup):
+    result = normalize_schedule(raw_schedule, schedule_team_lookup)
+
+    expected = pd.DataFrame({
+        "GAME_ID": ["0022500001", "0022500002", "0022500003"],
+        "GAME_DATE": pd.to_datetime([
+            "2025-11-01",
+            "2025-11-01",
+            "2025-11-05",
+        ]),
+        "HOME_TEAM_ID": [1, 2, 1],
+        "AWAY_TEAM_ID": [2, 1, 2],
+    })
+
+    pd.testing.assert_frame_equal(result, expected)
+
+@pytest.mark.parametrize("with_columns", [False, True])
+def test_normalize_schedule_handles_empty_input(raw_schedule, schedule_team_lookup, with_columns):
+    df = raw_schedule.iloc[:0] if with_columns else pd.DataFrame()
+
+    result = normalize_schedule(df, schedule_team_lookup)
+
+    assert result.empty
+    assert result.columns.tolist() == [
+        "GAME_ID", "GAME_DATE", "HOME_TEAM_ID", "AWAY_TEAM_ID",
+    ]
+    assert pd.api.types.is_datetime64_any_dtype(result["GAME_DATE"])
+
+def test_normalize_schedule_handles_no_matching_games(raw_schedule, schedule_team_lookup):
+    # This fixture row is a preseason game.
+    df = raw_schedule.iloc[[1]]
+
+    result = normalize_schedule(df, schedule_team_lookup)
+
+    assert result.empty
+    assert result.columns.tolist() == [
+        "GAME_ID", "GAME_DATE", "HOME_TEAM_ID", "AWAY_TEAM_ID",
+    ]
+    assert pd.api.types.is_datetime64_any_dtype(result["GAME_DATE"])
+
+def test_normalize_schedule_preserves_original(raw_schedule, schedule_team_lookup):
+    original = raw_schedule.copy(deep=True)
+
+    result = normalize_schedule(raw_schedule, schedule_team_lookup)
+
+    pd.testing.assert_frame_equal(raw_schedule, original)
+    assert result is not raw_schedule
