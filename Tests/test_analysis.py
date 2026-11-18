@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 from unittest.mock import Mock
 from fantasy_basketball import analysis
+from fantasy_basketball.database import get_connection, initialize_database
 
 @pytest.fixture
 def mocked_nba(monkeypatch):
