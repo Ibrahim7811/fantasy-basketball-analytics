@@ -207,3 +207,140 @@ def test_sync_schedule_leaves_commit_to_caller(connection, saved_team_lookup, mo
     connection.rollback()
 
     assert connection.execute(SCHEDULE_QUERY).fetchall() == original
+
+PLAYER_STATS_QUERY = """
+    SELECT game_id, player_id, team_id, minutes,
+           pts, reb, ast, stl, blk, tov
+    FROM player_game_stats
+    ORDER BY game_id, player_id
+"""
+
+
+@pytest.fixture
+def player_log_source(connection, saved_team_lookup, mocked_schedule_feed, monkeypatch):
+    lookup = dict(saved_team_lookup)
+    lookup["OTH"] = 3
+
+    connection.execute("""
+        INSERT INTO teams (team_id, name, abbreviation)
+        VALUES (3, 'Other Team', 'OTH')
+    """)
+    ingestion.sync_schedule(connection, "2025-26", lookup)
+    connection.commit()
+
+    logs = pd.DataFrame({
+        "Game_ID": ["0022500002", "0022500001"],
+        "MATCHUP": ["HOM @ AWY", "HOM vs. AWY"],
+        "MIN": [36.5, 32.5],
+        "PTS": [30, 20],
+        "REB": [9, 8],
+        "AST": [6, 5],
+        "STL": [2, 1],
+        "BLK": [3, 2],
+        "TOV": [4, 3],
+    })
+
+    player_lookup = Mock(return_value=10)
+    log_fetcher = Mock(return_value=logs)
+
+    monkeypatch.setattr(ingestion, "get_player_id", player_lookup)
+    monkeypatch.setattr(ingestion, "get_player_game_logs", log_fetcher)
+
+    return lookup, player_lookup, log_fetcher
+
+@pytest.mark.parametrize("first_matchup", ["HOM @ AWY", "HOM vs. AWY"])
+def test_sync_player_logs_saves_records(connection, player_log_source, first_matchup):
+    lookup, player_lookup, log_fetcher = player_log_source
+    log_fetcher.return_value.loc[0, "MATCHUP"] = first_matchup
+
+    count = ingestion.sync_player_game_logs(
+        connection, "Test Player", "2025-26", lookup
+    )
+
+    assert count == 2
+    assert connection.execute(PLAYER_STATS_QUERY).fetchall() == [
+        ("0022500001", 10, 1, 32.5, 20, 8, 5, 1, 2, 3),
+        ("0022500002", 10, 1, 36.5, 30, 9, 6, 2, 3, 4),
+    ]
+    assert connection.execute(
+        "SELECT player_id, name FROM players"
+    ).fetchall() == [(10, "Test Player")]
+
+    # The saved schedule remains authoritative for home and away.
+    assert connection.execute("""
+        SELECT home_team, away_team
+        FROM games WHERE game_id = '0022500002'
+    """).fetchone() == (2, 1)
+
+    player_lookup.assert_called_once_with("Test Player")
+    log_fetcher.assert_called_once_with(10, "2025-26")
+
+def test_sync_player_logs_updates_without_duplicates(connection, player_log_source):
+    lookup, _, log_fetcher = player_log_source
+    ingestion.sync_player_game_logs(
+        connection, "Test Player", "2025-26", lookup
+    )
+
+    log_fetcher.return_value.loc[0, "PTS"] = 45
+    log_fetcher.return_value.loc[0, "MATCHUP"] = "AWY vs. HOM"
+
+    count = ingestion.sync_player_game_logs(
+        connection, "Test Player", "2025-26", lookup
+    )
+
+    assert count == 2
+    assert connection.execute("""
+        SELECT game_id, team_id, pts
+        FROM player_game_stats
+        ORDER BY game_id
+    """).fetchall() == [
+        ("0022500001", 1, 20),
+        ("0022500002", 2, 45),
+    ]
+
+@pytest.mark.parametrize(
+    "row_index, column, value, error",
+    [
+        (0, "Game_ID", "missing", "missing from the schedule"),
+        (0, "MATCHUP", "OTH @ AWY", "Teams do not match"),
+        (1, "Game_ID", "missing", "missing from the schedule"),
+    ],
+)
+def test_sync_player_logs_failure_rolls_back_batch(connection, player_log_source, row_index, column, value, error):
+    lookup, _, log_fetcher = player_log_source
+    log_fetcher.return_value.loc[row_index, column] = value
+
+    with pytest.raises(ValueError, match=error):
+        with connection:
+            ingestion.sync_player_game_logs(connection, "Test Player", "2025-26", lookup)
+
+    assert connection.execute(PLAYER_STATS_QUERY).fetchall() == []
+    assert connection.execute(
+        "SELECT COUNT(*) FROM players"
+    ).fetchone()[0] == 0
+
+
+def test_sync_player_logs_handles_empty_results(connection, player_log_source):
+    lookup, _, log_fetcher = player_log_source
+    log_fetcher.return_value = pd.DataFrame()
+
+    count = ingestion.sync_player_game_logs(
+        connection, "Test Player", "2025-26", lookup
+    )
+
+    assert count == 0
+    assert connection.execute(PLAYER_STATS_QUERY).fetchall() == []
+    assert connection.execute(
+        "SELECT player_id, name FROM players"
+    ).fetchall() == [(10, "Test Player")]
+
+def test_sync_player_logs_leaves_commit_to_caller(connection, player_log_source):
+    lookup, _, _ = player_log_source
+
+    ingestion.sync_player_game_logs(connection, "Test Player", "2025-26", lookup)
+    connection.rollback()
+
+    assert connection.execute(PLAYER_STATS_QUERY).fetchall() == []
+    assert connection.execute(
+        "SELECT COUNT(*) FROM players"
+    ).fetchone()[0] == 0

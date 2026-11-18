@@ -1,8 +1,8 @@
 import sqlite3
 import re
 from nba_api.stats.static import teams as nba_teams
-from fantasy_basketball.database import upsert_team, upsert_game
-from fantasy_basketball.nba_data import get_season_schedule
+from fantasy_basketball.database import upsert_team, upsert_game, upsert_player, upsert_player_game_stats
+from fantasy_basketball.nba_data import get_season_schedule, get_player_id, get_player_game_logs
 from fantasy_basketball.data_processing import normalize_schedule
 
 def sync_teams(connection: sqlite3.Connection) -> dict[str, int]:
@@ -47,3 +47,37 @@ def sync_schedule(connection: sqlite3.Connection, season: str, team_lookup: dict
         away_team=int(row.AWAY_TEAM_ID)
         upsert_game(connection, game_id, game_date, season, home_team, away_team)
     return len(schedule_df)
+
+def sync_player_game_logs(connection: sqlite3.Connection, player_name: str, season: str, team_lookup: dict[str, int],) -> int:
+    player_id = get_player_id(player_name)
+    game_logs = get_player_game_logs(player_id, season)
+
+    upsert_player(connection, player_id, player_name)
+
+    for row in game_logs.itertuples(index=False):
+        game_id = str(row.Game_ID)
+        player_team_id, parsed_home, parsed_away = parse_matchup(row.MATCHUP, team_lookup)
+        stored_game = connection.execute("""
+            SELECT home_team, away_team
+            FROM games
+            WHERE game_id = ? AND season = ?
+        """, (game_id, season)).fetchone()
+
+        if stored_game is None:
+            raise ValueError(f"Game {game_id} is missing from the schedule")
+        if {parsed_home, parsed_away} != set(stored_game):
+            raise ValueError(f"Teams do not match the schedule for {game_id}")
+        upsert_player_game_stats(
+            connection,
+            game_id=game_id,
+            player_id=player_id,
+            team_id=player_team_id,
+            minutes=float(row.MIN),
+            pts=int(row.PTS),
+            reb=int(row.REB),
+            ast=int(row.AST),
+            stl=int(row.STL),
+            blk=int(row.BLK),
+            tov=int(row.TOV))
+        
+    return len(game_logs)
