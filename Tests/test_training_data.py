@@ -194,3 +194,64 @@ def test_split_training_dataset_preserves_input_and_returns_copies(split_dataset
     train_df.loc[0, "FANTASY_POINTS"] = -999.0
     test_df.loc[0, "FANTASY_POINTS"] = -888.0
     pd.testing.assert_frame_equal(split_dataset, original)
+
+@pytest.mark.parametrize(
+    "validation_fraction, train_positions, validation_positions",
+    [
+        (0.2, [4, 2, 1, 5], [3]),
+        (0.4, [4, 2, 1], [5, 3]),
+    ],
+)
+def test_three_way_split_values_and_order(split_dataset,validation_fraction,train_positions,validation_positions):
+    train_df, validation_df, test_df = (training_data.split_train_validation_test(split_dataset,validation_fraction=validation_fraction,test_fraction=0.2,))
+    expected_train = split_dataset.iloc[train_positions].reset_index(drop=True)
+    expected_validation = split_dataset.iloc[validation_positions].reset_index(drop=True)
+    expected_test = split_dataset.iloc[[6, 0]].reset_index(drop=True)
+    pd.testing.assert_frame_equal(train_df, expected_train)
+    pd.testing.assert_frame_equal(validation_df, expected_validation)
+    pd.testing.assert_frame_equal(test_df, expected_test)
+    assert train_df["GAME_DATE"].max() < validation_df["GAME_DATE"].min()
+    assert validation_df["GAME_DATE"].max() < test_df["GAME_DATE"].min()
+    assert (len(train_df) + len(validation_df) + len(test_df) == len(split_dataset))
+
+def test_three_way_split_defaults(split_dataset):
+    train_df, validation_df, test_df = (training_data.split_train_validation_test(split_dataset))
+    assert train_df["GAME_DATE"].nunique() == 3
+    assert validation_df["GAME_DATE"].nunique() == 1
+    assert test_df["GAME_DATE"].nunique() == 1
+
+@pytest.mark.parametrize(
+    "argument",
+    ["validation_fraction", "test_fraction"],
+)
+@pytest.mark.parametrize("value", [-0.1, 0, 1, 1.1, float("nan")])
+def test_three_way_split_rejects_invalid_fractions(split_dataset, argument, value):
+    with pytest.raises(ValueError, match=argument):
+        training_data.split_train_validation_test(split_dataset, **{argument: value})
+
+@pytest.mark.parametrize(
+    "validation_fraction, test_fraction",
+    [(0.5, 0.5), (0.6, 0.5)],
+)
+def test_three_way_split_rejects_invalid_sum(split_dataset, validation_fraction, test_fraction):
+    with pytest.raises(ValueError, match="sum to less than 1"):
+        training_data.split_train_validation_test(split_dataset,validation_fraction=validation_fraction,test_fraction=test_fraction)
+
+def test_three_way_split_rejects_empty_input(split_dataset):
+    with pytest.raises(ValueError, match="cannot be empty"):
+        training_data.split_train_validation_test(split_dataset.iloc[:0].copy())
+
+@pytest.mark.parametrize("date_count", [1, 2])
+def test_three_way_split_rejects_insufficient_dates(split_dataset, date_count):
+    dates = pd.date_range("2025-11-01", periods=date_count)
+    small_df = split_dataset.loc[split_dataset["GAME_DATE"].isin(dates)].copy()
+    with pytest.raises(ValueError, match="At least three unique game dates"):
+        training_data.split_train_validation_test(small_df)
+
+def test_three_way_split_preserves_input_and_returns_copies(split_dataset):
+    original = split_dataset.copy(deep=True)
+    splits = training_data.split_train_validation_test(split_dataset)
+    pd.testing.assert_frame_equal(split_dataset, original)
+    for frame in splits:
+        frame.loc[0, "FANTASY_POINTS"] = -999.0
+    pd.testing.assert_frame_equal(split_dataset, original)
