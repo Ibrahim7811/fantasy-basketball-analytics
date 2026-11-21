@@ -3,7 +3,13 @@ import pandas as pd
 from fantasy_basketball.database import load_player_game_logs
 from fantasy_basketball.data_processing import prepare_game_logs
 
-FEATURE_COLUMNS = ["FP_AVG_5", "FP_AVG_10", "REST_DAYS"]
+FEATURE_COLUMNS = [
+    "FP_AVG_5",
+    "FP_AVG_10",
+    "REST_DAYS",
+    "MIN_AVG_5",
+    "MIN_AVG_10",
+]
 
 def build_training_dataset(connection: sqlite3.Connection, player_ids: list[int], seasons: list[str], scoring_weights: dict[str, float],) -> pd.DataFrame:
     frames = []

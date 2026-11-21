@@ -27,9 +27,12 @@ def add_rest_days(df: pd.DataFrame) -> pd.DataFrame:
     rest_df["REST_DAYS"] = (rest_df["GAME_DATE"].diff().dt.days - 1)
     return rest_df
 
-def prepare_game_logs(df: pd.DataFrame, scoring_weights: dict[str, float], windows: tuple[int, ...] = (5, 10),) -> pd.DataFrame:
-    prepped_df = add_rest_days(add_rolling_averages(calculate_fantasy_points(clean_game_logs(df),scoring_weights),windows))
-    return prepped_df
+def prepare_game_logs(df: pd.DataFrame, scoring_weights: dict[str, float], windows: tuple[int, ...] = (5, 10)) -> pd.DataFrame:
+    prepped_df = clean_game_logs(df)
+    prepped_df = calculate_fantasy_points(prepped_df, scoring_weights)
+    prepped_df = add_rolling_averages(prepped_df, windows)
+    prepped_df = add_minutes_features(prepped_df, windows)
+    return add_rest_days(prepped_df)
 
 def normalize_schedule(df: pd.DataFrame,team_lookup: dict[str, int],) -> pd.DataFrame:
     column_mapping = {
@@ -52,3 +55,10 @@ def normalize_schedule(df: pd.DataFrame,team_lookup: dict[str, int],) -> pd.Data
     schedule_df = schedule_df.loc[valid_games].copy()
     schedule_df["GAME_DATE"] = pd.to_datetime(schedule_df["GAME_DATE"],format="%m/%d/%Y %H:%M:%S",)
     return (schedule_df.sort_values(["GAME_DATE", "GAME_ID"]).reset_index(drop=True))
+
+def add_minutes_features(df: pd.DataFrame, windows: tuple[int, ...] = (5, 10)) -> pd.DataFrame:
+    minutes_df = df.copy()
+    previous_minutes = minutes_df["MIN"].shift(1)
+    for window in windows:
+        minutes_df[f"MIN_AVG_{window}"] = (previous_minutes.rolling(window=window, min_periods=1).mean())
+    return minutes_df

@@ -21,6 +21,7 @@ def make_training_logs(player_id, year, points, team_id=1):
             for i in range(count)
         ]),
         "PTS": points,
+        "MIN": [float(player_id + 10 * (year - 2023))] * count,
         "TOV": [1] * count,
     })
 
@@ -74,6 +75,8 @@ def test_build_training_dataset_values_and_history_separation(connection, histor
         "FP_AVG_5": [10.0, 15.0, 40.0, 70.0, 45.0, 75.0],
         "FP_AVG_10": [10.0, 15.0, 40.0, 70.0, 45.0, 75.0],
         "REST_DAYS": [1.0] * 6,
+        "MIN_AVG_5": [20.0, 20.0, 30.0, 40.0, 30.0, 40.0],
+        "MIN_AVG_10": [20.0, 20.0, 30.0, 40.0, 30.0, 40.0],
         "FANTASY_POINTS": [20.0, 30.0, 50.0, 80.0, 60.0, 90.0],
     })
     pd.testing.assert_frame_equal(result, expected)

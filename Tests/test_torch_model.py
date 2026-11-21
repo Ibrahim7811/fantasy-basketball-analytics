@@ -44,19 +44,21 @@ def scaler_training_df():
             "FANTASY_POINTS": [100.0, 200.0],
             "FP_AVG_10": [20.0, 40.0],
             "FP_AVG_5": [10.0, 30.0],
+            "MIN_AVG_5": [20.0, 40.0],
+            "MIN_AVG_10": [22.0, 42.0],
         })
 
 def test_fit_feature_scaler_learns_only_selected_features(scaler_training_df,):
     scaler = fit_feature_scaler(scaler_training_df)
     assert list(scaler.feature_names_in_) == FEATURE_COLUMNS
-    np.testing.assert_allclose(scaler.mean_, [20.0, 30.0, 1.0])
-    np.testing.assert_allclose(scaler.scale_, [10.0, 10.0, 1.0])
+    np.testing.assert_allclose(scaler.mean_, [20.0, 30.0, 1.0, 30.0, 32.0])
+    np.testing.assert_allclose(scaler.scale_, [10.0, 10.0, 1.0, 10.0, 10.0])
     transformed = scaler.transform(scaler_training_df[FEATURE_COLUMNS])
     np.testing.assert_allclose(
         transformed,
         [
-            [-1.0, -1.0, -1.0],
-            [1.0, 1.0, 1.0],
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
         ])
 
 def test_fitted_scaler_can_transform_future_data(scaler_training_df):
@@ -67,9 +69,11 @@ def test_fitted_scaler_can_transform_future_data(scaler_training_df):
             "FP_AVG_5": [50.0],
             "FP_AVG_10": [60.0],
             "REST_DAYS": [4.0],
+            "MIN_AVG_5": [60.0],
+            "MIN_AVG_10": [62.0],
         })
     transformed = scaler.transform(future_features)
-    np.testing.assert_allclose(transformed, [[3.0, 3.0, 3.0]])
+    np.testing.assert_allclose(transformed, [[3.0, 3.0, 3.0, 3.0, 3.0]])
     np.testing.assert_array_equal(scaler.mean_, original_means)
     np.testing.assert_array_equal(scaler.scale_, original_scales)
 
@@ -89,7 +93,7 @@ def test_prepare_tensors_values_shapes_and_row_alignment(scaler_training_df, row
     # Reverse the rows to check that inputs and targets stay aligned.
     df = scaler_training_df.iloc[[1, 0]].iloc[:row_count].copy()
     inputs, targets = prepare_tensors(df, scaler)
-    expected_inputs = torch.tensor([[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]],dtype=torch.float32)[:row_count]
+    expected_inputs = torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0], [-1.0, -1.0, -1.0, -1.0, -1.0]],dtype=torch.float32)[:row_count]
     expected_targets = torch.tensor([200.0, 100.0],dtype=torch.float32)[:row_count]
     assert inputs.shape == (row_count, len(FEATURE_COLUMNS))
     assert targets.shape == (row_count,)
@@ -107,10 +111,12 @@ def test_prepare_tensors_uses_existing_scaler_statistics(scaler_training_df,):
             "FP_AVG_5": [50.0],
             "FP_AVG_10": [60.0],
             "REST_DAYS": [4.0],
+            "MIN_AVG_5": [60.0],
+            "MIN_AVG_10": [62.0],
             "FANTASY_POINTS": [75.0],
         })
     inputs, targets = prepare_tensors(future_df, scaler)
-    torch.testing.assert_close(inputs,torch.tensor([[3.0, 3.0, 3.0]], dtype=torch.float32))
+    torch.testing.assert_close(inputs,torch.tensor([[3.0, 3.0, 3.0, 3.0, 3.0]], dtype=torch.float32))
     torch.testing.assert_close(targets,torch.tensor([75.0], dtype=torch.float32))
     np.testing.assert_array_equal(scaler.mean_, original_means)
     np.testing.assert_array_equal(scaler.scale_, original_scales)
@@ -138,7 +144,7 @@ def training_step_data():
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.zero_()
-    inputs = torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],dtype=torch.float32)
+    inputs = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, 1.0]],dtype=torch.float32)
     targets = torch.tensor([2.0, 4.0], dtype=torch.float32)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     return model, inputs, targets, optimizer
@@ -248,6 +254,8 @@ def neural_training_frames(scaler_training_df):
             "FP_AVG_5": [50.0, 70.0],
             "FP_AVG_10": [60.0, 80.0],
             "REST_DAYS": [4.0, 6.0],
+            "MIN_AVG_5": [60.0, 80.0],
+            "MIN_AVG_10": [62.0, 82.0],
             "FANTASY_POINTS": [75.0, 95.0],
         })
     return train_df, validation_df
@@ -264,7 +272,7 @@ def test_train_neural_network_real_training(neural_training_frames):
         assert len(losses) == 5
         assert np.isfinite(losses).all()
     # Statistics must come exclusively from training features.
-    np.testing.assert_allclose(scaler.mean_, [20.0, 30.0, 1.0])
+    np.testing.assert_allclose(scaler.mean_, [20.0, 30.0, 1.0, 30.0, 32.0])
     assert scaler.n_samples_seen_ == len(train_df)
     validation_inputs, validation_targets = prepare_tensors(validation_df, scaler)
     restored_loss = evaluate_network_loss(model, validation_inputs, validation_targets)
@@ -299,7 +307,7 @@ def test_train_neural_network_stopping_and_best_weights(
     def fake_train(model, inputs, targets, optimizer):
         nonlocal epoch_count
         epoch_count += 1
-        torch.testing.assert_close(inputs,torch.tensor([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]))
+        torch.testing.assert_close(inputs,torch.tensor([[-1.0, -1.0, -1.0, -1.0, -1.0], [1.0, 1.0, 1.0, 1.0, 1.0]]))
         torch.testing.assert_close(targets, torch.tensor([100.0, 200.0]))
         # Mutate a real parameter so restoration can be checked.
         with torch.no_grad():
@@ -310,7 +318,7 @@ def test_train_neural_network_stopping_and_best_weights(
         torch.testing.assert_close(
             inputs,
             torch.tensor(
-                [[3.0, 3.0, 3.0], [5.0, 5.0, 5.0]]
+                [[3.0, 3.0, 3.0, 3.0, 3.0], [5.0, 5.0, 5.0, 5.0, 5.0]]
             ))
         torch.testing.assert_close(targets, torch.tensor([75.0, 95.0]))
         return next(validation_losses)
@@ -381,7 +389,7 @@ def prediction_setup(scaler_training_df):
     # Use a simple layer with known weights to verify predictions.
     model.network = torch.nn.Linear(len(FEATURE_COLUMNS), 1)
     with torch.no_grad():
-        model.network.weight.copy_(torch.tensor([[2.0, 3.0, 4.0]]))
+        model.network.weight.copy_(torch.tensor([[2.0, 3.0, 4.0, 5.0, 6.0]]))
         model.network.bias.fill_(5.0)
     return model, scaler
 
@@ -391,9 +399,9 @@ def test_predict_neural_network_values_and_order(scaler_training_df, prediction_
     # Targets are deliberately absent; reverse rows to check ordering.
     features = (scaler_training_df.drop(columns=["FANTASY_POINTS"]).iloc[[1, 0]].iloc[:row_count].copy())
     predictions = predict_neural_network(model, features, scaler)
-    # Scaled rows are [1, 1, 1] and [-1, -1, -1].
-    # Prediction = 2*x1 + 3*x2 + 4*x3 + 5.
-    expected = np.array([14.0, -4.0], dtype=np.float32)[:row_count]
+    # Scaled rows contain five ones and five negative ones.
+    # Prediction = 2*x1 + 3*x2 + 4*x3 + 5*x4 + 6*x5 + 5.
+    expected = np.array([25.0, -15.0], dtype=np.float32)[:row_count]
     assert isinstance(predictions, np.ndarray)
     assert predictions.shape == (row_count,)
     assert predictions.dtype == np.float32
@@ -403,6 +411,8 @@ def test_predict_neural_network_preserves_data_model_and_scaler(prediction_setup
     model, scaler = prediction_setup
     features = pd.DataFrame({
             "REST_DAYS": [4.0],
+            "MIN_AVG_5": [60.0],
+            "MIN_AVG_10": [62.0],
             "FP_AVG_10": [20.0],
             "FP_AVG_5": [50.0],
         },
@@ -413,9 +423,9 @@ def test_predict_neural_network_preserves_data_model_and_scaler(prediction_setup
     original_sample_count = scaler.n_samples_seen_
     original_weights = [parameter.detach().clone() for parameter in model.parameters()]
     predictions = predict_neural_network(model, features, scaler)
-    # Scaled features: [3, -1, 3].
-    # 2*3 + 3*(-1) + 4*3 + 5 = 20.
-    np.testing.assert_allclose(predictions, [20.0])
+    # Scaled features: [3, -1, 3, 3, 3].
+    # 2*3 + 3*(-1) + 4*3 + 5*3 + 6*3 + 5 = 53.
+    np.testing.assert_allclose(predictions, [53.0])
     pd.testing.assert_frame_equal(features, original_features)
     np.testing.assert_array_equal(scaler.mean_, original_means)
     np.testing.assert_array_equal(scaler.scale_, original_scales)

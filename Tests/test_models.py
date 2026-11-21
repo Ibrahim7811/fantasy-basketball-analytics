@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 @pytest.fixture
 def training_df():
-    df = pd.DataFrame(list(product([10.0, 20.0], [12.0, 24.0], [0.0, 2.0])),columns=FEATURE_COLUMNS,)
+    df = pd.DataFrame(list(product([10.0, 20.0], [12.0, 24.0], [0.0, 2.0], [20.0, 40.0], [22.0, 42.0])),columns=FEATURE_COLUMNS,)
 
     # A known relationship lets us check predictions independently.
     df["FANTASY_POINTS"] = (
@@ -27,6 +27,8 @@ def test_train_linear_regression_learns_relationship(training_df):
             "FP_AVG_5": [15.0, 18.0],
             "FP_AVG_10": [18.0, 20.0],
             "REST_DAYS": [1.0, 0.0],
+            "MIN_AVG_5": [30.0, 30.0],
+            "MIN_AVG_10": [32.0, 32.0],
         })
     predictions = model.predict(unseen_features)
     assert isinstance(model, LinearRegression)
@@ -35,7 +37,7 @@ def test_train_linear_regression_learns_relationship(training_df):
 def test_train_linear_regression_uses_only_pregame_features(training_df):
     model = train_linear_regression(training_df)
     assert list(model.feature_names_in_) == FEATURE_COLUMNS
-    assert model.n_features_in_ == 3
+    assert model.n_features_in_ == len(FEATURE_COLUMNS)
 
 def test_train_linear_regression_rejects_empty_input(training_df):
     empty_df = training_df.iloc[:0].copy()
@@ -54,6 +56,8 @@ def forest_training_df():
             "FP_AVG_5": [10.0] * 60 + [50.0] * 60,
             "FP_AVG_10": [15.0] * 60 + [55.0] * 60,
             "REST_DAYS": [1.0] * 120,
+            "MIN_AVG_5": [30.0] * 120,
+            "MIN_AVG_10": [32.0] * 120,
             "FANTASY_POINTS": [20.0] * 60 + [80.0] * 60,
             "PLAYER_ID": [10] * 60 + [20] * 60,
         })
@@ -64,6 +68,8 @@ def test_train_random_forest_learns_signal(forest_training_df):
             "FP_AVG_5": [10.0, 50.0],
             "FP_AVG_10": [15.0, 55.0],
             "REST_DAYS": [1.0, 1.0],
+            "MIN_AVG_5": [30.0, 30.0],
+            "MIN_AVG_10": [32.0, 32.0],
         })
     predictions = model.predict(features)
     assert isinstance(model, RandomForestRegressor)
@@ -72,7 +78,7 @@ def test_train_random_forest_learns_signal(forest_training_df):
 def test_train_random_forest_uses_only_pregame_features(forest_training_df,):
     model = train_random_forest(forest_training_df)
     assert list(model.feature_names_in_) == FEATURE_COLUMNS
-    assert model.n_features_in_ == 3
+    assert model.n_features_in_ == len(FEATURE_COLUMNS)
 
 def test_train_random_forest_is_reproducible(forest_training_df):
     first = train_random_forest(forest_training_df, random_state=7)

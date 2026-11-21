@@ -178,6 +178,7 @@ def test_prepare_game_logs_pipeline():
             ],
             "PTS": [50, 20, 40, 30],
             "TOV": [4, 1, 3, 2],
+            "MIN": [40.0, 10.0, 30.0, 20.0],
         },
         index=[8, 3, 6, 2],
     )
@@ -199,8 +200,10 @@ def test_prepare_game_logs_pipeline():
         ]),
         "PTS": [20, 30, 40, 50],
         "TOV": [1, 2, 3, 4],
+        "MIN": [10.0, 20.0, 30.0, 40.0],
         "FANTASY_POINTS": [19.0, 28.0, 37.0, 46.0],
         "FP_AVG_2": [nan, 19.0, 23.5, 32.5],
+        "MIN_AVG_2": [nan, 10.0, 15.0, 25.0],
         "REST_DAYS": [nan, 0.0, 2.0, 1.0],
     })
 
