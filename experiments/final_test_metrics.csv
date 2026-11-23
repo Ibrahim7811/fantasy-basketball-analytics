@@ -1,0 +1,5 @@
+model,test_rows,test_mae,improvement_over_baseline_pct,selected_on_validation
+Linear Regression,685,9.02101928364798,3.0393145985201278,True
+PyTorch,685,9.037086175514833,2.8666227109741866,False
+Rolling average (5),685,9.303790754257907,0.0,False
+Random Forest,685,9.6674594339859,-3.9088226437332496,False
