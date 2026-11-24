@@ -8,7 +8,8 @@ from fantasy_basketball.inference import (
     predict_stored_player_next_game, 
     project_roster_for_date,
     optimize_projected_day,
-    calculate_projected_rest_days)
+    calculate_projected_rest_days,
+    optimize_projected_week)
 from itertools import product
 from unittest.mock import Mock, call
 import numpy as np
@@ -694,4 +695,112 @@ def test_daily_optimizer_passes_player_schedule_to_prediction(monkeypatch, model
     assert lineup["PG"]._projected_points == 42.5
     assert total == pytest.approx(42.5)
     assert player._schedule == schedule
+    assert player._projected_points == 10.0
+
+@pytest.mark.parametrize("model_type", ["sklearn", "pytorch"])
+@pytest.mark.parametrize("cutoff", [None, "2026-01-30"])
+def test_optimize_projected_week_uses_daily_projections_and_fixed_cutoff(monkeypatch, model_type, cutoff):
+    schedule = ["2026-02-01", "2026-02-03"]
+    players = [
+        Player("First Player", ["PG"], 999.0, schedule.copy(), "BOS"),
+        Player("Second Player", ["PG"], 888.0, schedule.copy(), "NYK")]
+    player_ids = {"First Player": 101, "Second Player": 202}
+    connection = object()
+    projections = {
+        ("2026-02-01", 101): 40.0,
+        ("2026-02-01", 202): 30.0,
+        ("2026-02-03", 101): 20.0,
+        ("2026-02-03", 202): 50.0}
+    def predict_player(connection, player_id, season, game_date, model_path, model_type, as_of_date=None, scheduled_dates=None):
+        return projections[(game_date, player_id)]
+    predictor = Mock(side_effect=predict_player)
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    results, total = optimize_projected_week(
+        connection,
+        players,
+        player_ids,
+        "2025-26",
+        "2026-02-01",
+        "2026-02-03",
+        ["PG"],
+        "saved_model",
+        model_type,
+        as_of_date=cutoff)
+    expected_cutoff = cutoff if cutoff is not None else "2026-02-01"
+    assert list(results) == ["2026-02-01", "2026-02-02", "2026-02-03"]
+    assert results["2026-02-01"]["lineup"]["PG"]._name == "First Player"
+    assert results["2026-02-01"]["projected_points"] == pytest.approx(40.0)
+    assert results["2026-02-02"]["projected_points"] == pytest.approx(0.0)
+    assert results["2026-02-03"]["lineup"]["PG"]._name == "Second Player"
+    assert results["2026-02-03"]["projected_points"] == pytest.approx(50.0)
+    assert total == pytest.approx(90.0)
+    assert predictor.call_args_list == [
+        call(connection, 101, "2025-26", "2026-02-01", "saved_model", model_type, as_of_date=expected_cutoff, scheduled_dates=schedule),
+        call(connection, 202, "2025-26", "2026-02-01", "saved_model", model_type, as_of_date=expected_cutoff, scheduled_dates=schedule),
+        call(connection, 101, "2025-26", "2026-02-03", "saved_model", model_type, as_of_date=expected_cutoff, scheduled_dates=schedule),
+        call(connection, 202, "2025-26", "2026-02-03", "saved_model", model_type, as_of_date=expected_cutoff, scheduled_dates=schedule)]
+    assert players[0]._projected_points == 999.0
+    assert players[1]._projected_points == 888.0
+    assert players[0]._schedule == schedule
+    assert players[1]._schedule == schedule
+
+def test_optimize_projected_week_normalizes_dates_and_supports_single_day(monkeypatch):
+    game_date = "2026-02-01"
+    player = Player("Test Player", ["PG"], 10.0, [game_date], "BOS")
+    predictor = Mock(return_value=42.5)
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    results, total = optimize_projected_week(
+        None,
+        [player],
+        {"Test Player": 101},
+        "2025-26",
+        "2026-02-01 18:00:00",
+        "2026-02-01 01:00:00",
+        ["PG"],
+        "saved_model",
+        as_of_date="2026-02-01 23:00:00")
+    assert list(results) == [game_date]
+    assert total == pytest.approx(42.5)
+    predictor.assert_called_once_with(
+        None,
+        101,
+        "2025-26",
+        game_date,
+        "saved_model",
+        "sklearn",
+        as_of_date=game_date,
+        scheduled_dates=[game_date])
+
+def test_optimize_projected_week_empty_roster_returns_all_dates(monkeypatch):
+    predictor = Mock()
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    results, total = optimize_projected_week(None, [], {}, "2025-26", "2026-02-01", "2026-02-03", ["PG"], "unused.pkl")
+    assert list(results) == ["2026-02-01", "2026-02-02", "2026-02-03"]
+    assert all(result["projected_points"] == 0.0 for result in results.values())
+    assert total == 0.0
+    predictor.assert_not_called()
+
+@pytest.mark.parametrize("start, end, cutoff, model_type, error", [
+    ("NaT", "2026-02-03", None, "sklearn", "Invalid date"),
+    ("2026-02-01", "NaT", None, "sklearn", "Invalid date"),
+    ("2026-02-03", "2026-02-01", None, "sklearn", "Invalid date range"),
+    ("2026-02-01", "2026-02-03", "NaT", "sklearn", "Invalid cutoff date"),
+    ("2026-02-01", "2026-02-03", "2026-02-02", "sklearn", "History cutoff cannot be after start date"),
+    ("2026-02-01", "2026-02-03", None, "unknown", "Invalid model")
+])
+def test_optimize_projected_week_rejects_invalid_inputs_before_optimization(monkeypatch, start, end, cutoff, model_type, error):
+    optimizer = Mock()
+    monkeypatch.setattr(inference, "optimize_projected_day", optimizer)
+    with pytest.raises(ValueError, match=error):
+        optimize_projected_week(None, [], {}, "2025-26", start, end, ["PG"], "unused", model_type, as_of_date=cutoff)
+    optimizer.assert_not_called()
+
+def test_optimize_projected_week_propagates_prediction_failure(monkeypatch):
+    player = Player("Test Player", ["PG"], 10.0, ["2026-02-01"], "BOS")
+    predictor = Mock(side_effect=ValueError("No completed games before prediction date"))
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    with pytest.raises(ValueError, match="No completed games"):
+        optimize_projected_week(
+            None, [player], {"Test Player": 101}, "2025-26",
+            "2026-02-01", "2026-02-03", ["PG"], "unused.pkl")
     assert player._projected_points == 10.0

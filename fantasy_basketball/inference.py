@@ -185,3 +185,54 @@ def calculate_projected_rest_days(last_completed_date: str, game_date: str, sche
         if cutoff <= scheduled_date < upcoming:
             previous_game = max(previous_game, scheduled_date)
     return (upcoming - previous_game).days - 1
+
+def optimize_projected_week(
+    connection: sqlite3.Connection,
+    players: list[Player],
+    player_ids: dict[str, int],
+    season: str,
+    start_date: str,
+    end_date: str,
+    lineup_slots: list[str],
+    model_path: str,
+    model_type: str = "sklearn",
+    as_of_date: str | None = None,
+) -> tuple[dict[str, dict[str, object]], float]:
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    if pd.isna(start) or pd.isna(end):
+        raise ValueError("Invalid date")
+    start = start.normalize()
+    end = end.normalize()
+    if start > end:
+        raise ValueError("Invalid date range")
+    if as_of_date is None:
+        cutoff = start
+    else:
+        cutoff = pd.Timestamp(as_of_date)
+        if pd.isna(cutoff):
+            raise ValueError("Invalid cutoff date")
+        cutoff = cutoff.normalize()
+    if cutoff > start:
+        raise ValueError("History cutoff cannot be after start date")
+    if model_type != "sklearn" and model_type != "pytorch":
+        raise ValueError("Invalid model")
+    weekly_results = {}
+    weekly_total = 0.0
+    for day in pd.date_range(start, end):
+        game_date = day.strftime("%Y-%m-%d")
+        lineup, projected_total = optimize_projected_day(
+            connection,
+            players,
+            player_ids,
+            season,
+            game_date,
+            lineup_slots,
+            model_path,
+            model_type,
+            as_of_date=cutoff.strftime("%Y-%m-%d"))
+        weekly_results[game_date] = {
+            "lineup": lineup,
+            "projected_points": projected_total}
+        weekly_total += projected_total
+    return weekly_results, weekly_total
