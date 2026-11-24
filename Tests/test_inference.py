@@ -1,9 +1,16 @@
 import pandas as pd
 import pytest
 import torch
-from fantasy_basketball.inference import build_next_game_features, predict_next_game_sklearn, predict_next_game_neural_network, predict_stored_player_next_game
+from fantasy_basketball.inference import (
+    build_next_game_features, 
+    predict_next_game_sklearn, 
+    predict_next_game_neural_network, 
+    predict_stored_player_next_game, 
+    project_roster_for_date,
+    optimize_projected_day,
+    calculate_projected_rest_days)
 from itertools import product
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
@@ -11,6 +18,7 @@ from fantasy_basketball import inference
 from fantasy_basketball.model_persistence import save_sklearn_model, save_neural_network
 from sklearn.preprocessing import StandardScaler
 from fantasy_basketball.torch_model import FantasyPointsNet
+from fantasy_basketball.player_class import Player
 
 ALL_FEATURES = [
     "FP_AVG_5",
@@ -225,16 +233,15 @@ def stored_prediction_source(request, monkeypatch):
             "2025-11-03",
             "2025-11-05 00:00:00",
             "2025-11-05 23:00:00",
-            "2025-11-06",
-        ], format="mixed"),
+            "2025-11-06"],
+            format="mixed"),
         "MIN": [20.0, 40.0, 999.0, 999.0, 999.0],
         "PTS": [10, 20, 999, 999, 999],
         "REB": [4, 8, 999, 999, 999],
         "AST": [0] * 5,
         "STL": [0] * 5,
         "BLK": [0] * 5,
-        "TOV": [0] * 5,
-    })
+        "TOV": [0] * 5})
     weights = {"PTS": 2.0,"REB": 0.5,"AST": 3.0,"STL": 4.0,"BLK": 5.0,"TOV": -2.0}
     columns = ["REST_DAYS","MIN_AVG_10","FP_AVG_5","MIN_AVG_5","FP_AVG_10"]
     model = Mock()
@@ -267,7 +274,14 @@ def stored_prediction_source(request, monkeypatch):
 def test_stored_prediction_filters_history_and_uses_saved_weights(stored_prediction_source):
     source = stored_prediction_source
     original = source["logs"].copy(deep=True)
-    projection = predict_stored_player_next_game(source["connection"],10,"2025-26","2025-11-05 12:00:00","saved_model",model_type=source["model_type"])
+    projection = predict_stored_player_next_game(
+        source["connection"],
+        10,
+        "2025-26",
+        "2025-11-05 12:00:00",
+        "saved_model",
+        model_type=source["model_type"],
+        as_of_date=None)
     assert type(projection) is float
     assert projection == pytest.approx(77.25)
     source["log_fetcher"].assert_called_once_with(source["connection"], 10, "2025-26")
@@ -306,20 +320,41 @@ def test_stored_prediction_rejects_missing_prior_history(stored_prediction_sourc
     else:
         source["log_fetcher"].return_value = logs.loc[logs["GAME_DATE"] >= pd.Timestamp("2025-11-05")].copy()
     with pytest.raises(ValueError, match="No completed games"):
-        predict_stored_player_next_game(source["connection"],10,"2025-26","2025-11-05","saved_model",model_type=source["model_type"])
+        predict_stored_player_next_game(
+            source["connection"],
+            10,
+            "2025-26",
+            "2025-11-05",
+            "saved_model",
+            model_type=source["model_type"],
+            as_of_date=None)
     source["model"].predict.assert_not_called()
     source["neural_predictor"].assert_not_called()
 
 def test_stored_prediction_rejects_missing_game_date(stored_prediction_source):
     source = stored_prediction_source
     with pytest.raises(ValueError, match="date cannot be missing"):
-        predict_stored_player_next_game(source["connection"],10,"2025-26","NaT","saved_model",model_type=source["model_type"])
+        predict_stored_player_next_game(
+            source["connection"],
+            10,
+            "2025-26",
+            "NaT",
+            "saved_model",
+            model_type=source["model_type"],
+            as_of_date=None)
 
 def test_stored_prediction_rejects_missing_history_date(stored_prediction_source):
     source = stored_prediction_source
     source["logs"].loc[0, "GAME_DATE"] = pd.NaT
     with pytest.raises(ValueError, match="missing dates"):
-        predict_stored_player_next_game(source["connection"],10,"2025-26","2025-11-05","saved_model",model_type=source["model_type"])
+        predict_stored_player_next_game(
+            source["connection"],
+            10,
+            "2025-26",
+            "2025-11-05",
+            "saved_model",
+            model_type=source["model_type"],
+            as_of_date=None)
 
 @pytest.mark.parametrize(
     "bad_prediction",
@@ -331,8 +366,332 @@ def test_stored_prediction_rejects_nonfinite_result(stored_prediction_source, ba
     source["model"].predict.return_value = output
     source["neural_predictor"].return_value = output
     with pytest.raises(ValueError, match="Prediction must be finite"):
-        predict_stored_player_next_game(source["connection"],10,"2025-26","2025-11-05","saved_model",model_type=source["model_type"])
+        predict_stored_player_next_game(
+            source["connection"],
+            10,
+            "2025-26",
+            "2025-11-05",
+            "saved_model",
+            model_type=source["model_type"],
+            as_of_date=None)
 
 def test_stored_prediction_rejects_invalid_model_type():
     with pytest.raises(ValueError, match="Invalid model type"):
-        predict_stored_player_next_game(None,10,"2025-26","2025-11-05","unused",model_type="unknown")
+        predict_stored_player_next_game(None,10,"2025-26","2025-11-05","unused",model_type="unknown",as_of_date=None)
+
+@pytest.mark.parametrize("model_type", ["sklearn", "pytorch"])
+def test_project_roster_projects_only_scheduled_players(monkeypatch, model_type):
+    game_date = "2026-02-01"
+    players = [
+        Player("First Player", ["PG", "SG"], 10.0, [game_date, "2026-02-03"], "BOS"),
+        Player("Off-Day Player", ["C"], 20.0, ["2026-02-02"], "DEN"),
+        Player("Second Player", ["SF", "PF"], 30.0, [game_date], "NYK")]
+    player_ids = {"First Player": 101, "Second Player": 202}
+    connection = object()
+    predictor = Mock(side_effect=[42.5, 35.25])
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    projected = project_roster_for_date(connection, players, player_ids, "2025-26", game_date, "saved_model", model_type)
+    assert predictor.call_args_list == [
+        call(connection, 101, "2025-26", game_date, "saved_model", model_type, as_of_date=None, scheduled_dates=[game_date, "2026-02-03"]),
+        call(connection, 202, "2025-26", game_date, "saved_model", model_type, as_of_date=None, scheduled_dates=[game_date])]
+    assert len(projected) == 2
+    for result, original, expected_projection in [(projected[0], players[0], 42.5),(projected[1], players[2], 35.25)]:
+        assert isinstance(result, Player)
+        assert result is not original
+        assert result._name == original._name
+        assert result._positions == original._positions
+        assert result._positions is not original._positions
+        assert result._team == original._team
+        assert result._projected_points == expected_projection
+        assert result._schedule == [game_date]
+    assert [player._projected_points for player in players] == [10.0, 20.0, 30.0]
+    assert players[0]._schedule == [game_date, "2026-02-03"]
+    assert players[1]._schedule == ["2026-02-02"]
+    assert players[2]._schedule == [game_date]
+    projected[0]._positions.append("SF")
+    assert players[0]._positions == ["PG", "SG"]
+
+def test_project_roster_rejects_missing_id_for_playing_player(monkeypatch):
+    game_date = "2026-02-01"
+    player = Player("Missing Player", ["C"], 20.0, [game_date], "DEN")
+    predictor = Mock()
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    with pytest.raises(ValueError, match="Missing NBA player ID for Missing Player"):
+        project_roster_for_date(None, [player], {}, "2025-26", game_date, "unused.pkl")
+    predictor.assert_not_called()
+
+@pytest.mark.parametrize("has_off_day_player", [False, True])
+def test_project_roster_returns_empty_when_nobody_plays(monkeypatch, has_off_day_player):
+    players = []
+    if has_off_day_player:
+        players = [Player("Off-Day Player", ["PG"], 20.0, ["2026-02-02"], "BOS")]
+    predictor = Mock()
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    result = project_roster_for_date(None, players, {}, "2025-26", "2026-02-01", "unused.pkl")
+    assert result == []
+    predictor.assert_not_called()
+
+def test_project_roster_propagates_prediction_failure(monkeypatch):
+    game_date = "2026-02-01"
+    player = Player("Test Player", ["C"], 20.0, [game_date], "DEN")
+    predictor = Mock(side_effect=ValueError("No completed games before prediction date"))
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    with pytest.raises(ValueError, match="No completed games"):
+        project_roster_for_date(None, [player], {"Test Player": 101}, "2025-26", game_date, "unused.pkl")
+    assert player._projected_points == 20.0
+    assert player._schedule == [game_date]
+
+@pytest.mark.parametrize("model_type", ["sklearn", "pytorch"])
+def test_optimize_projected_day_finds_best_lineup_using_model_projections(monkeypatch, model_type):
+    game_date = "2026-02-01"
+    players = [
+        Player("Flexible Guard", ["PG", "SG"], 1.0, [game_date], "BOS"),
+        Player("Point Guard", ["PG"], 1000.0, [game_date], "NYK"),
+        Player("Shooting Guard", ["SG"], 500.0, [game_date], "DEN"),
+        Player("Off-Day Star", ["PG", "SG"], 9999.0, ["2026-02-02"], "CLE")]
+    player_ids = {"Flexible Guard": 101, "Point Guard": 202, "Shooting Guard": 303}
+    projections = {101: 50.0, 202: 40.0, 303: 30.0}
+    connection = object()
+    def predict_player(connection, player_id, season, game_date, model_path, model_type,as_of_date=None, scheduled_dates=None):
+        return projections[player_id]
+    predictor = Mock(side_effect=predict_player)
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    lineup, total = optimize_projected_day(
+        connection, 
+        players, 
+        player_ids, 
+        "2025-26", 
+        game_date, 
+        ["PG", "SG"], 
+        "saved_model", 
+        model_type)
+    # The flexible guard must play SG so the stronger PG-only player can start.
+    assert lineup["PG"]._name == "Point Guard"
+    assert lineup["SG"]._name == "Flexible Guard"
+    assert lineup["PG"]._projected_points == 40.0
+    assert lineup["SG"]._projected_points == 50.0
+    assert total == pytest.approx(90.0)
+    assert len({id(player) for player in lineup.values()}) == 2
+    assert all(player.plays_on(game_date) for player in lineup.values())
+    assert predictor.call_args_list == [
+        call(connection, 101, "2025-26", game_date, "saved_model", model_type, as_of_date=None, scheduled_dates=[game_date]),
+        call(connection, 202, "2025-26", game_date, "saved_model", model_type, as_of_date=None, scheduled_dates=[game_date]),
+        call(connection, 303, "2025-26", game_date, "saved_model", model_type, as_of_date=None, scheduled_dates=[game_date])]
+    assert [player._projected_points for player in players] == [1.0, 1000.0, 500.0, 9999.0]
+
+@pytest.mark.parametrize("empty_roster", [True, False])
+def test_optimize_projected_day_returns_zero_when_nobody_plays(monkeypatch, empty_roster):
+    players = []
+    if not empty_roster:
+        players = [Player("Off-Day Player", ["PG"], 50.0, ["2026-02-02"], "BOS")]
+    predictor = Mock()
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    lineup, total = optimize_projected_day(None, players, {}, "2025-26", "2026-02-01", ["PG", "SG"], "unused.pkl")
+    assert total == pytest.approx(0.0)
+    assert all(player is None for player in lineup.values())
+    predictor.assert_not_called()
+
+def test_optimize_projected_day_propagates_prediction_failure(monkeypatch):
+    game_date = "2026-02-01"
+    players = [Player("Test Player", ["PG"], 20.0, [game_date], "BOS")]
+    predictor = Mock(side_effect=ValueError("No completed games before prediction date"))
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    with pytest.raises(ValueError, match="No completed games"):
+        optimize_projected_day(None, players, {"Test Player": 101}, "2025-26", game_date, ["PG"], "unused.pkl")
+    assert players[0]._projected_points == 20.0
+
+def test_stored_prediction_uses_fixed_history_cutoff(stored_prediction_source):
+    source = stored_prediction_source
+    original = source["logs"].copy(deep=True)
+    projection = predict_stored_player_next_game(
+        source["connection"],
+        10,
+        "2025-26",
+        "2025-11-05",
+        "saved_model",
+        model_type=source["model_type"],
+        as_of_date="2025-11-03 12:00:00")
+    # The cutoff normalizes to November 3, so only November 1 contributes.
+    expected = pd.DataFrame([{
+        "REST_DAYS": 3,
+        "MIN_AVG_10": 20.0,
+        "FP_AVG_5": 22.0,
+        "MIN_AVG_5": 20.0,
+        "FP_AVG_10": 22.0}])
+    if source["model_type"] == "sklearn":
+        actual = source["model"].predict.call_args.args[0]
+    else:
+        actual = source["neural_predictor"].call_args.args[1]
+    assert projection == pytest.approx(77.25)
+    pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(source["logs"], original)
+
+@pytest.mark.parametrize("cutoff, error", [
+    ("NaT", "History cutoff date cannot be missing"),
+    ("2025-11-06", "History cutoff cannot be after prediction date"),
+    ("2025-11-01", "No completed games")
+])
+def test_stored_prediction_rejects_invalid_or_unusable_cutoff(stored_prediction_source, cutoff, error):
+    source = stored_prediction_source
+    with pytest.raises(ValueError, match=error):
+        predict_stored_player_next_game(
+            source["connection"],
+            10,
+            "2025-26",
+            "2025-11-05",
+            "saved_model",
+            model_type=source["model_type"],
+            as_of_date=cutoff)
+    source["model"].predict.assert_not_called()
+    source["neural_predictor"].assert_not_called()
+
+@pytest.mark.parametrize("model_type", ["sklearn", "pytorch"])
+def test_daily_optimizer_passes_cutoff_through_roster_to_prediction(monkeypatch, model_type):
+    game_date = "2026-02-05"
+    cutoff = "2026-02-01"
+    player = Player("Test Player", ["PG"], 10.0, [game_date], "BOS")
+    connection = object()
+    predictor = Mock(return_value=42.5)
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    lineup, total = optimize_projected_day(
+        connection,
+        [player],
+        {"Test Player": 101},
+        "2025-26",
+        game_date,
+        ["PG"],
+        "saved_model",
+        model_type,
+        as_of_date=cutoff)
+    predictor.assert_called_once_with(
+        connection,
+        101,
+        "2025-26",
+        game_date,
+        "saved_model",
+        model_type,
+        as_of_date=cutoff,
+        scheduled_dates=[game_date])
+    assert lineup["PG"]._name == "Test Player"
+    assert lineup["PG"]._projected_points == 42.5
+    assert total == pytest.approx(42.5)
+    assert player._projected_points == 10.0
+
+@pytest.mark.parametrize("schedule, expected", [
+    (["2026-02-01", "2026-02-03", "2026-02-05"], 1),
+    (["2026-02-04", "2026-02-05"], 0),
+    (["2026-02-01"], 3),
+    ([], 5),
+    (["2026-02-05", "2026-02-06"], 5),
+    (["2026-01-31"], 5),
+    (["2026-02-03", "2026-02-01", "2026-02-03"], 1)
+])
+def test_calculate_projected_rest_days_uses_schedule_after_cutoff(schedule, expected):
+    result = calculate_projected_rest_days("2026-01-30", "2026-02-05", schedule, "2026-02-01")
+    assert result == expected
+    assert type(result) is int
+
+def test_calculate_projected_rest_days_normalizes_times():
+    result = calculate_projected_rest_days(
+        "2026-01-30 23:00:00", "2026-02-05 01:00:00",
+        ["2026-02-03 23:00:00"], "2026-02-01 12:00:00")
+    assert result == 1
+
+def test_calculate_projected_rest_days_allows_target_on_cutoff():
+    result = calculate_projected_rest_days("2026-01-30", "2026-02-01", ["2026-02-01"], "2026-02-01")
+    assert result == 1
+
+@pytest.mark.parametrize("last_completed, upcoming, cutoff", [
+    ("2026-02-01", "2026-02-05", "2026-02-01"),
+    ("2026-02-02", "2026-02-05", "2026-02-01"),
+    ("2026-01-30", "2026-02-05", "2026-02-06")
+])
+def test_calculate_projected_rest_days_rejects_invalid_order(last_completed, upcoming, cutoff):
+    with pytest.raises(ValueError, match="Invalid rest-day date order"):
+        calculate_projected_rest_days(last_completed, upcoming, [], cutoff)
+
+@pytest.mark.parametrize("last_completed, upcoming, cutoff", [
+    ("NaT", "2026-02-05", "2026-02-01"),
+    ("2026-01-30", "NaT", "2026-02-01"),
+    ("2026-01-30", "2026-02-05", "NaT")
+])
+def test_calculate_projected_rest_days_rejects_missing_dates(last_completed, upcoming, cutoff):
+    with pytest.raises(ValueError, match="Rest-day dates cannot be missing"):
+        calculate_projected_rest_days(last_completed, upcoming, [], cutoff)
+
+def test_calculate_projected_rest_days_rejects_missing_scheduled_date():
+    with pytest.raises(ValueError, match="Scheduled dates cannot be missing"):
+        calculate_projected_rest_days("2026-01-30", "2026-02-05", ["NaT"], "2026-02-01")
+
+def test_calculate_projected_rest_days_preserves_schedule():
+    schedule = ["2026-02-03", "2026-02-01", "2026-02-03"]
+    original = schedule.copy()
+    calculate_projected_rest_days("2026-01-30", "2026-02-05", schedule, "2026-02-01")
+    assert schedule == original
+
+@pytest.mark.parametrize("schedule, expected_rest", [
+    (None, 3),
+    ([], 3),
+    (["2025-11-03", "2025-11-05"], 1),
+    (["2025-11-04", "2025-11-05"], 0),
+    (["2025-11-05", "2025-11-06"], 3)
+])
+def test_stored_prediction_uses_scheduled_rest_with_frozen_history(stored_prediction_source, schedule, expected_rest):
+    source = stored_prediction_source
+    original = source["logs"].copy(deep=True)
+    projection = predict_stored_player_next_game(
+        source["connection"],
+        10,
+        "2025-26",
+        "2025-11-05",
+        "saved_model",
+        model_type=source["model_type"],
+        as_of_date="2025-11-03",
+        scheduled_dates=schedule)
+    # Only November 1 supplies performance data, regardless of the schedule.
+    expected = pd.DataFrame([{
+        "REST_DAYS": expected_rest,
+        "MIN_AVG_10": 20.0,
+        "FP_AVG_5": 22.0,
+        "MIN_AVG_5": 20.0,
+        "FP_AVG_10": 22.0}])
+    if source["model_type"] == "sklearn":
+        actual = source["model"].predict.call_args.args[0]
+    else:
+        actual = source["neural_predictor"].call_args.args[1]
+    assert projection == pytest.approx(77.25)
+    pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(source["logs"], original)
+
+@pytest.mark.parametrize("model_type", ["sklearn", "pytorch"])
+def test_daily_optimizer_passes_player_schedule_to_prediction(monkeypatch, model_type):
+    game_date = "2026-02-05"
+    cutoff = "2026-02-01"
+    schedule = ["2026-02-01", "2026-02-03", game_date]
+    player = Player("Test Player", ["PG"], 10.0, schedule.copy(), "BOS")
+    connection = object()
+    predictor = Mock(return_value=42.5)
+    monkeypatch.setattr(inference, "predict_stored_player_next_game", predictor)
+    lineup, total = optimize_projected_day(
+        connection,
+        [player],
+        {"Test Player": 101},
+        "2025-26",
+        game_date,
+        ["PG"],
+        "saved_model",
+        model_type,
+        as_of_date=cutoff)
+    predictor.assert_called_once_with(
+        connection,
+        101,
+        "2025-26",
+        game_date,
+        "saved_model",
+        model_type,
+        as_of_date=cutoff,
+        scheduled_dates=schedule)
+    assert lineup["PG"]._projected_points == 42.5
+    assert total == pytest.approx(42.5)
+    assert player._schedule == schedule
+    assert player._projected_points == 10.0
