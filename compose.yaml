@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    image: fantasy-basketball-api
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      FANTASY_DB_PATH: /data/fantasy_basketball.db
+      FANTASY_MODEL_DIR: /models
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./models/32_players_3_features
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).close()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
