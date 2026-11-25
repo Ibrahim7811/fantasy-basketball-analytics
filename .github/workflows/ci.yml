@@ -42,9 +42,11 @@ jobs:
             fantasy-basketball-api:ci
 
       - name: Check container health endpoint
+        timeout-minutes: 2
         run: |
           curl --fail --silent --show-error \
-            --retry 20 --retry-connrefused --retry-delay 2 \
+            --retry 30 --retry-all-errors --retry-delay 2 \
+            --retry-max-time 90 --connect-timeout 2 --max-time 5 \
             http://127.0.0.1:8000/health
 
       - name: Show container logs
