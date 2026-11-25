@@ -3,6 +3,7 @@ from fantasy_basketball.api import app
 from unittest.mock import Mock
 import pytest
 from fantasy_basketball import api as api_module
+from fantasy_basketball.player_class import Player
 
 def test_health_endpoint_returns_ok():
     with TestClient(app) as client:
@@ -140,4 +141,161 @@ def test_predict_endpoint_closes_connection_after_unexpected_failure(prediction_
     source["predictor"].side_effect = RuntimeError("Unexpected inference failure")
     with pytest.raises(RuntimeError, match="Unexpected inference failure"):
         source["client"].post("/predict", json=prediction_body)
+    source["connection"].close.assert_called_once_with()
+
+@pytest.fixture
+def daily_lineup_body():
+    return {
+        "players": [
+            {
+                "player_id": 201939,
+                "name": "Stephen Curry",
+                "positions": ["PG"],
+                "team": "GSW",
+                "schedule": ["2026-02-05", "2026-02-03"]},
+            {
+                "player_id": 203999,
+                "name": "Nikola Jokic",
+                "positions": ["C"],
+                "team": "DEN",
+                "schedule": ["2026-02-05"]}],
+        "season": "2025-26",
+        "game_date": "2026-02-05",
+        "lineup_slots": ["PG", "C1", "SG"]}
+
+@pytest.fixture
+def daily_lineup_api(prediction_api, monkeypatch):
+    source = prediction_api
+    lineup = {
+        "PG": Player("Stephen Curry", ["PG"], 42.5, ["2026-02-05"], "GSW"),
+        "C1": Player("Nikola Jokic", ["C"], 57.5, ["2026-02-05"], "DEN")}
+    optimizer = Mock(return_value=(lineup, 100.0))
+    monkeypatch.setattr(api_module, "optimize_projected_day", optimizer)
+    return {**source, "optimizer": optimizer}
+
+@pytest.mark.parametrize("model", ["linear_regression", "random_forest", "pytorch"])
+@pytest.mark.parametrize("cutoff", [None, "2026-02-01"])
+def test_daily_lineup_endpoint_converts_roster_and_returns_lineup(daily_lineup_api, daily_lineup_body, model, cutoff):
+    source = daily_lineup_api
+    payload = {**daily_lineup_body, "model": model}
+    if cutoff is not None:
+        payload["as_of_date"] = cutoff
+    response = source["client"].post("/lineups/daily", json=payload)
+    effective_cutoff = cutoff or "2026-02-05"
+    assert response.status_code == 200
+    assert response.json() == {
+        "season": "2025-26",
+        "game_date": "2026-02-05",
+        "model": model,
+        "as_of_date": effective_cutoff,
+        "lineup": {
+            "PG": {
+                "player_id": 201939,
+                "name": "Stephen Curry",
+                "positions": ["PG"],
+                "team": "GSW",
+                "projected_fp": 42.5},
+            "C1": {
+                "player_id": 203999,
+                "name": "Nikola Jokic",
+                "positions": ["C"],
+                "team": "DEN",
+                "projected_fp": 57.5},
+            "SG": None},
+        "projected_total": 100.0}
+    source["connector"].assert_called_once_with(str(source["db_path"]))
+    source["optimizer"].assert_called_once()
+    args = source["optimizer"].call_args.args
+    kwargs = source["optimizer"].call_args.kwargs
+    assert args[0] is source["connection"]
+    players = args[1]
+    assert len(players) == 2
+    assert all(isinstance(player, Player) for player in players)
+    assert [player._name for player in players] == ["Stephen Curry", "Nikola Jokic"]
+    assert [player._positions for player in players] == [["PG"], ["C"]]
+    assert [player._team for player in players] == ["GSW", "DEN"]
+    assert all(player._projected_points == 0.0 for player in players)
+    assert players[0]._schedule == ["2026-02-03", "2026-02-05"]
+    assert players[1]._schedule == ["2026-02-05"]
+    model_path, model_type = source["configs"][model]
+    assert args[2:] == (
+        {"Stephen Curry": 201939,
+         "Nikola Jokic": 203999},
+        "2025-26",
+        "2026-02-05",
+        ["PG", "C1", "SG"],
+        str(model_path),
+        model_type)
+    assert kwargs == {"as_of_date": effective_cutoff}
+    assert [item.args[1] for item in source["connection"].execute.call_args_list] == [(201939,), (203999,)]
+    source["connection"].close.assert_called_once_with()
+
+def test_daily_lineup_endpoint_defaults_to_linear_regression(daily_lineup_api, daily_lineup_body):
+    source = daily_lineup_api
+    response = source["client"].post("/lineups/daily", json=daily_lineup_body)
+    assert response.status_code == 200
+    assert response.json()["model"] == "linear_regression"
+    assert response.json()["as_of_date"] == "2026-02-05"
+
+def test_daily_lineup_endpoint_returns_null_for_every_unfilled_slot(daily_lineup_api, daily_lineup_body):
+    source = daily_lineup_api
+    source["optimizer"].return_value = ({}, 0.0)
+    response = source["client"].post("/lineups/daily", json=daily_lineup_body)
+    assert response.status_code == 200
+    assert response.json()["lineup"] == {"PG": None, "C1": None, "SG": None}
+    assert response.json()["projected_total"] == 0.0
+    source["connection"].close.assert_called_once_with()
+
+@pytest.mark.parametrize("problem", ["duplicate_id", "duplicate_name", "future_cutoff", "invalid_position"])
+def test_daily_lineup_endpoint_rejects_invalid_roster_before_database_access(daily_lineup_api, daily_lineup_body, problem):
+    source = daily_lineup_api
+    if problem == "duplicate_id":
+        daily_lineup_body["players"][1]["player_id"] = 201939
+    elif problem == "duplicate_name":
+        daily_lineup_body["players"][1]["name"] = "  STEPHEN CURRY  "
+    elif problem == "future_cutoff":
+        daily_lineup_body["as_of_date"] = "2026-02-06"
+    else:
+        daily_lineup_body["players"][0]["positions"] = ["INVALID"]
+    response = source["client"].post("/lineups/daily", json=daily_lineup_body)
+    assert response.status_code == 422
+    source["connector"].assert_not_called()
+    source["optimizer"].assert_not_called()
+
+@pytest.mark.parametrize("missing_resource", ["database", "model"])
+def test_daily_lineup_endpoint_returns_503_for_missing_resources(daily_lineup_api, daily_lineup_body, missing_resource):
+    source = daily_lineup_api
+    if missing_resource == "database":
+        source["db_path"].unlink()
+    else:
+        source["configs"]["linear_regression"][0].unlink()
+    response = source["client"].post("/lineups/daily", json=daily_lineup_body)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Prediction service data or model is unavailable"}
+    source["connector"].assert_not_called()
+    source["optimizer"].assert_not_called()
+
+def test_daily_lineup_endpoint_returns_404_for_unknown_roster_player(daily_lineup_api, daily_lineup_body):
+    source = daily_lineup_api
+    source["connection"].execute.return_value.fetchone.side_effect = [(201939,), None]
+    response = source["client"].post("/lineups/daily", json=daily_lineup_body)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Player not found: 203999"}
+    source["optimizer"].assert_not_called()
+    source["connection"].close.assert_called_once_with()
+
+def test_daily_lineup_endpoint_returns_422_for_inference_error(daily_lineup_api, daily_lineup_body):
+    source = daily_lineup_api
+    message = "No completed games before prediction date"
+    source["optimizer"].side_effect = ValueError(message)
+    response = source["client"].post("/lineups/daily", json=daily_lineup_body)
+    assert response.status_code == 422
+    assert response.json() == {"detail": message}
+    source["connection"].close.assert_called_once_with()
+
+def test_daily_lineup_endpoint_closes_connection_after_unexpected_failure(daily_lineup_api, daily_lineup_body):
+    source = daily_lineup_api
+    source["optimizer"].side_effect = RuntimeError("Unexpected optimization failure")
+    with pytest.raises(RuntimeError, match="Unexpected optimization failure"):
+        source["client"].post("/lineups/daily", json=daily_lineup_body)
     source["connection"].close.assert_called_once_with()
