@@ -106,3 +106,42 @@ class DailyLineupResponse(BaseModel):
     as_of_date: date
     lineup: dict[str, ProjectedPlayerResponse | None]
     projected_total: float = Field(allow_inf_nan=False)
+
+class WeeklyLineupRequest(BaseModel):
+    players: list[RosterPlayerRequest] = Field(min_length=1)
+    season: str = Field(pattern=r"^\d{4}-\d{2}$")
+    start_date: date
+    end_date: date
+    lineup_slots: list[Literal["PG", "SG", "G", "SF", "PF", "F", "C1", "C2", "UTIL1", "UTIL2"]] = Field(min_length=1)
+    model: Literal["linear_regression", "random_forest", "pytorch"] = "linear_regression"
+    as_of_date: date | None = None
+
+    @field_validator("lineup_slots")
+    @classmethod
+    def validate_lineup_slots(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("Duplicate lineup slots")
+        return value
+
+    @model_validator(mode="after")
+    def validate_roster_and_dates(self) -> Self:
+        player_ids = [player.player_id for player in self.players]
+        names = [player.name.casefold() for player in self.players]
+        if len(player_ids) != len(set(player_ids)):
+            raise ValueError("Duplicate player IDs")
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate player names")
+        if self.start_date > self.end_date:
+            raise ValueError("start_date cannot be after end_date")
+        if self.as_of_date is not None and self.as_of_date > self.start_date:
+            raise ValueError("as_of_date cannot be after start_date")
+        return self
+
+class WeeklyLineupResponse(BaseModel):
+    season: str
+    start_date: date
+    end_date: date
+    model: Literal["linear_regression", "random_forest", "pytorch"]
+    as_of_date: date
+    daily_results: list[DailyLineupResponse]
+    projected_total: float = Field(allow_inf_nan=False)

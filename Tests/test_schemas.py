@@ -8,7 +8,9 @@ from fantasy_basketball.schemas import (
     RosterPlayerRequest,
     DailyLineupRequest,
     ProjectedPlayerResponse,
-    DailyLineupResponse)
+    DailyLineupResponse,
+    WeeklyLineupRequest,
+    WeeklyLineupResponse)
 
 @pytest.fixture
 def prediction_payload():
@@ -369,3 +371,160 @@ def test_projected_player_response_rejects_invalid_fields(daily_lineup_response_
     with pytest.raises(ValidationError) as error:
         ProjectedPlayerResponse(**player)
     assert any(item["loc"][0] == field for item in error.value.errors())
+
+@pytest.fixture
+def weekly_lineup_payload(roster_player_payload):
+    return {
+        "players": [deepcopy(roster_player_payload)],
+        "season": "2025-26",
+        "start_date": "2026-02-02",
+        "end_date": "2026-02-08",
+        "lineup_slots": ["C1", "UTIL1"]}
+
+def test_weekly_lineup_request_parses_roster_and_sets_defaults(weekly_lineup_payload):
+    request = WeeklyLineupRequest(**weekly_lineup_payload)
+    assert isinstance(request.players[0], RosterPlayerRequest)
+    assert request.start_date == date(2026, 2, 2)
+    assert request.end_date == date(2026, 2, 8)
+    assert request.players[0].schedule == [date(2026, 2, 3), date(2026, 2, 5)]
+    assert request.lineup_slots == ["C1", "UTIL1"]
+    assert request.model == "linear_regression"
+    assert request.as_of_date is None
+
+@pytest.mark.parametrize("model", ["linear_regression", "random_forest", "pytorch"])
+def test_weekly_lineup_request_accepts_supported_models(weekly_lineup_payload, model):
+    request = WeeklyLineupRequest(**{**weekly_lineup_payload, "model": model})
+    assert request.model == model
+
+@pytest.mark.parametrize("cutoff", ["2026-02-01", "2026-02-02"])
+def test_weekly_lineup_request_accepts_valid_cutoffs(weekly_lineup_payload, cutoff):
+    request = WeeklyLineupRequest(**{**weekly_lineup_payload, "as_of_date": cutoff})
+    assert request.as_of_date == date.fromisoformat(cutoff)
+
+def test_weekly_lineup_request_accepts_single_day(weekly_lineup_payload):
+    request = WeeklyLineupRequest(**{**weekly_lineup_payload, "end_date": "2026-02-02"})
+    assert request.start_date == request.end_date
+
+@pytest.mark.parametrize("field", ["players", "season", "start_date", "end_date", "lineup_slots"])
+def test_weekly_lineup_request_requires_fields(weekly_lineup_payload, field):
+    del weekly_lineup_payload[field]
+    with pytest.raises(ValidationError) as error:
+        WeeklyLineupRequest(**weekly_lineup_payload)
+    assert any(item["loc"] == (field,) and item["type"] == "missing" for item in error.value.errors())
+
+@pytest.mark.parametrize("field, value", [
+    ("players", []),
+    ("season", "2025"),
+    ("start_date", "2026-02-30"),
+    ("end_date", "not-a-date"),
+    ("lineup_slots", []),
+    ("lineup_slots", ["PG", "PG"]),
+    ("lineup_slots", ["C"]),
+    ("model", "unknown"),
+    ("as_of_date", "not-a-date")
+])
+def test_weekly_lineup_request_rejects_invalid_fields(weekly_lineup_payload, field, value):
+    with pytest.raises(ValidationError) as error:
+        WeeklyLineupRequest(**{**weekly_lineup_payload, field: value})
+    assert any(item["loc"][0] == field for item in error.value.errors())
+
+@pytest.mark.parametrize("field, value, message", [
+    ("start_date", "2026-02-09", "start_date cannot be after end_date"),
+    ("as_of_date", "2026-02-03", "as_of_date cannot be after start_date")
+])
+def test_weekly_lineup_request_rejects_invalid_date_order(weekly_lineup_payload, field, value, message):
+    with pytest.raises(ValidationError, match=message):
+        WeeklyLineupRequest(**{**weekly_lineup_payload, field: value})
+
+@pytest.mark.parametrize("duplicate, message", [
+    ("id", "Duplicate player IDs"),
+    ("name", "Duplicate player names")
+])
+def test_weekly_lineup_request_rejects_duplicate_players(weekly_lineup_payload, duplicate, message):
+    original = weekly_lineup_payload["players"][0]
+    second = {**original, "player_id": 999999, "name": "Another Player"}
+    if duplicate == "id":
+        second["player_id"] = original["player_id"]
+    else:
+        second["name"] = f"  {original['name'].upper()}  "
+    weekly_lineup_payload["players"].append(second)
+    with pytest.raises(ValidationError, match=message):
+        WeeklyLineupRequest(**weekly_lineup_payload)
+
+def test_weekly_lineup_request_preserves_input_and_serializes_dates(weekly_lineup_payload):
+    original = deepcopy(weekly_lineup_payload)
+    request = WeeklyLineupRequest(**{**weekly_lineup_payload, "as_of_date": "2026-02-01"})
+    serialized = request.model_dump(mode="json")
+    assert serialized["start_date"] == "2026-02-02"
+    assert serialized["end_date"] == "2026-02-08"
+    assert serialized["as_of_date"] == "2026-02-01"
+    assert serialized["players"][0]["schedule"] == ["2026-02-03", "2026-02-05"]
+    assert weekly_lineup_payload == original
+
+@pytest.fixture
+def weekly_lineup_response_payload(daily_lineup_response_payload):
+    first_day = deepcopy(daily_lineup_response_payload)
+    second_day = {**deepcopy(first_day),"game_date": "2026-02-06","lineup": {"PG": None, "C1": None},"projected_total": 0.0}
+    return {
+        "season": "2025-26",
+        "start_date": "2026-02-05",
+        "end_date": "2026-02-06",
+        "model": "linear_regression",
+        "as_of_date": "2026-02-01",
+        "daily_results": [first_day, second_day],
+        "projected_total": 35.14}
+
+def test_weekly_lineup_response_parses_nested_days_and_serializes(weekly_lineup_response_payload):
+    response = WeeklyLineupResponse(**weekly_lineup_response_payload)
+    assert response.start_date == date(2026, 2, 5)
+    assert response.end_date == date(2026, 2, 6)
+    assert response.as_of_date == date(2026, 2, 1)
+    assert len(response.daily_results) == 2
+    assert all(isinstance(day, DailyLineupResponse) for day in response.daily_results)
+    assert isinstance(response.daily_results[0].lineup["PG"], ProjectedPlayerResponse)
+    assert response.daily_results[0].lineup["PG"].name == "Stephen Curry"
+    assert response.daily_results[1].lineup == {"PG": None, "C1": None}
+    assert response.daily_results[1].projected_total == 0.0
+    assert response.projected_total == pytest.approx(35.14)
+    assert response.model_dump(mode="json") == weekly_lineup_response_payload
+
+@pytest.mark.parametrize("model", ["linear_regression", "random_forest", "pytorch"])
+def test_weekly_lineup_response_accepts_supported_models(weekly_lineup_response_payload, model):
+    weekly_lineup_response_payload["model"] = model
+    for day in weekly_lineup_response_payload["daily_results"]:
+        day["model"] = model
+    response = WeeklyLineupResponse(**weekly_lineup_response_payload)
+    assert response.model == model
+
+@pytest.mark.parametrize("points", [float("nan"), float("inf"), float("-inf")])
+def test_weekly_lineup_response_rejects_nonfinite_total(weekly_lineup_response_payload, points):
+    with pytest.raises(ValidationError) as error:
+        WeeklyLineupResponse(**{**weekly_lineup_response_payload, "projected_total": points})
+    assert any(item["loc"] == ("projected_total",) for item in error.value.errors())
+
+@pytest.mark.parametrize("field", [
+    "season", "start_date", "end_date", "model", "as_of_date", "daily_results", "projected_total"
+])
+def test_weekly_lineup_response_requires_all_fields(weekly_lineup_response_payload, field):
+    del weekly_lineup_response_payload[field]
+    with pytest.raises(ValidationError) as error:
+        WeeklyLineupResponse(**weekly_lineup_response_payload)
+    assert any(item["loc"] == (field,) and item["type"] == "missing" for item in error.value.errors())
+
+def test_weekly_lineup_response_validates_nested_daily_total(weekly_lineup_response_payload):
+    weekly_lineup_response_payload["daily_results"][0]["projected_total"] = float("nan")
+    with pytest.raises(ValidationError) as error:
+        WeeklyLineupResponse(**weekly_lineup_response_payload)
+    assert any(item["loc"] == ("daily_results", 0, "projected_total") for item in error.value.errors())
+
+def test_weekly_lineup_response_validates_nested_player_projection(weekly_lineup_response_payload):
+    weekly_lineup_response_payload["daily_results"][0]["lineup"]["PG"]["projected_fp"] = float("inf")
+    with pytest.raises(ValidationError) as error:
+        WeeklyLineupResponse(**weekly_lineup_response_payload)
+    assert any(item["loc"] == ("daily_results", 0, "lineup", "PG", "projected_fp") for item in error.value.errors())
+
+def test_weekly_lineup_response_preserves_input(weekly_lineup_response_payload):
+    original = deepcopy(weekly_lineup_response_payload)
+    response = WeeklyLineupResponse(**weekly_lineup_response_payload)
+    response.daily_results[0].lineup["PG"].positions.append("SG")
+    assert weekly_lineup_response_payload == original
