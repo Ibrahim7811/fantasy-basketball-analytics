@@ -9,9 +9,14 @@ from fantasy_basketball.schemas import (
     DailyLineupResponse,
     ProjectedPlayerResponse,
     WeeklyLineupRequest,
-    WeeklyLineupResponse)
+    WeeklyLineupResponse,
+    RosterPlayerRequest,
+    MatchupRequest,
+    MatchupResponse)
 from fantasy_basketball.player_class import Player
 from datetime import date
+from fantasy_basketball.matchup import analyze_projected_matchup
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "fantasy_basketball.db"
@@ -20,6 +25,82 @@ MODEL_CONFIGS = {
     "linear_regression": (MODEL_DIR / "linear_regression.pkl", "sklearn"),
     "random_forest": (MODEL_DIR / "random_forest.pkl", "sklearn"),
     "pytorch": (MODEL_DIR / "neural_network.pt", "pytorch")}
+
+def build_api_roster(roster: list[RosterPlayerRequest]) -> tuple[list[Player], dict[str, int]]:
+    players = []
+    player_ids = {}
+    for roster_player in roster:
+        player_ids[roster_player.name] = roster_player.player_id
+        players.append(
+            Player(
+                name=roster_player.name,
+                positions=roster_player.positions.copy(),
+                projected_points=0.0,
+                schedule=[day.isoformat() for day in roster_player.schedule],
+                team=roster_player.team))
+    return players, player_ids
+
+def build_daily_lineup_response(
+    lineup: dict[str, Player | None],
+    player_ids: dict[str, int],
+    lineup_slots: list[str],
+    season: str,
+    game_date: date,
+    model: str,
+    as_of_date: date,
+    projected_total: float
+) -> DailyLineupResponse:
+    response_lineup = {}
+    for slot in lineup_slots:
+        player = lineup.get(slot)
+        if player is None:
+            response_lineup[slot] = None
+        else:
+            response_lineup[slot] = ProjectedPlayerResponse(
+                player_id=player_ids[player._name],
+                name=player._name,
+                positions=player._positions,
+                team=player._team,
+                projected_fp=player._projected_points)
+    return DailyLineupResponse(
+        season=season,
+        game_date=game_date,
+        model=model,
+        as_of_date=as_of_date,
+        lineup=response_lineup,
+        projected_total=projected_total)
+
+def build_weekly_lineup_response(
+    weekly_results: dict[str, dict[str, object]],
+    player_ids: dict[str, int],
+    lineup_slots: list[str],
+    season: str,
+    start_date: date,
+    end_date: date,
+    model: str,
+    as_of_date: date,
+    projected_total: float,
+) -> WeeklyLineupResponse:
+    daily_results = []
+    for game_date, result in sorted(weekly_results.items()):
+        daily_results.append(
+            build_daily_lineup_response(
+                lineup=result["lineup"],
+                player_ids=player_ids,
+                lineup_slots=lineup_slots,
+                season=season,
+                game_date=date.fromisoformat(game_date),
+                model=model,
+                as_of_date=as_of_date,
+                projected_total=result["projected_points"]))
+    return WeeklyLineupResponse(
+        season=season,
+        start_date=start_date,
+        end_date=end_date,
+        model=model,
+        as_of_date=as_of_date,
+        daily_results=daily_results,
+        projected_total=projected_total)
 
 app = FastAPI(title="Fantasy Basketball Analyzer")
 @app.get("/health")
@@ -65,17 +146,7 @@ def optimize_daily_lineup(request: DailyLineupRequest) -> DailyLineupResponse:
     if not DB_PATH.is_file() or not model_path.is_file():
         raise HTTPException(status_code=503,detail="Prediction service data or model is unavailable")
     cutoff = request.as_of_date or request.game_date
-    players = []
-    player_ids = {}
-    for roster_player in request.players:
-        player_ids[roster_player.name] = roster_player.player_id
-        players.append(
-            Player(
-                name=roster_player.name,
-                positions=roster_player.positions.copy(),
-                projected_points=0.0,
-                schedule=[day.isoformat() for day in roster_player.schedule],
-                team=roster_player.team))
+    players, player_ids = build_api_roster(request.players)
     connection = get_connection(str(DB_PATH))
     try:
         for roster_player in request.players:
@@ -98,24 +169,14 @@ def optimize_daily_lineup(request: DailyLineupRequest) -> DailyLineupResponse:
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
         connection.close()
-    response_lineup = {}
-    for slot in request.lineup_slots:
-        player = lineup.get(slot)
-        if player is None:
-            response_lineup[slot] = None
-        else:
-            response_lineup[slot] = ProjectedPlayerResponse(
-                player_id=player_ids[player._name],
-                name=player._name,
-                positions=player._positions,
-                team=player._team,
-                projected_fp=player._projected_points)
-    return DailyLineupResponse(
+    return build_daily_lineup_response(
+        lineup=lineup,
+        player_ids=player_ids,
+        lineup_slots=request.lineup_slots,
         season=request.season,
         game_date=request.game_date,
         model=request.model,
         as_of_date=cutoff,
-        lineup=response_lineup,
         projected_total=projected_total)
 
 @app.post("/lineups/weekly", response_model=WeeklyLineupResponse)
@@ -124,17 +185,7 @@ def optimize_weekly_lineup(request: WeeklyLineupRequest) -> WeeklyLineupResponse
     if not DB_PATH.is_file() or not model_path.is_file():
         raise HTTPException(status_code=503,detail="Prediction service data or model is unavailable")
     cutoff = request.as_of_date or request.start_date
-    players = []
-    player_ids = {}
-    for roster_player in request.players:
-        player_ids[roster_player.name] = roster_player.player_id
-        players.append(
-            Player(
-                name=roster_player.name,
-                positions=roster_player.positions.copy(),
-                projected_points=0.0,
-                schedule=[day.isoformat() for day in roster_player.schedule],
-                team=roster_player.team))
+    players, player_ids = build_api_roster(request.players)
     connection = get_connection(str(DB_PATH))
     try:
         for roster_player in request.players:
@@ -156,33 +207,75 @@ def optimize_weekly_lineup(request: WeeklyLineupRequest) -> WeeklyLineupResponse
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
         connection.close()
-    daily_results = []
-    for game_date, result in sorted(weekly_results.items()):
-        response_lineup = {}
-        for slot in request.lineup_slots:
-            player = result["lineup"].get(slot)
-            if player is None:
-                response_lineup[slot] = None
-            else:
-                response_lineup[slot] = ProjectedPlayerResponse(
-                    player_id=player_ids[player._name],
-                    name=player._name,
-                    positions=player._positions,
-                    team=player._team,
-                    projected_fp=player._projected_points)
-        daily_results.append(
-            DailyLineupResponse(
-                season=request.season,
-                game_date=date.fromisoformat(game_date),
-                model=request.model,
-                as_of_date=cutoff,
-                lineup=response_lineup,
-                projected_total=result["projected_points"]))
-    return WeeklyLineupResponse(
+    return build_weekly_lineup_response(
+        weekly_results=weekly_results,
+        player_ids=player_ids,
+        lineup_slots=request.lineup_slots,
         season=request.season,
         start_date=request.start_date,
         end_date=request.end_date,
         model=request.model,
         as_of_date=cutoff,
-        daily_results=daily_results,
         projected_total=projected_total)
+
+@app.post("/matchups", response_model=MatchupResponse)
+def analyze_matchup_endpoint(request: MatchupRequest) -> MatchupResponse:
+    model_path, model_type = MODEL_CONFIGS[request.model]
+    if not DB_PATH.is_file() or not model_path.is_file():
+        raise HTTPException(status_code=503,detail="Prediction service data or model is unavailable")
+    cutoff = request.as_of_date or request.start_date
+    team_a, team_a_ids = build_api_roster(request.team_a)
+    team_b, team_b_ids = build_api_roster(request.team_b)
+    player_ids = team_a_ids | team_b_ids
+    connection = get_connection(str(DB_PATH))
+    try:
+        for roster_player in request.team_a + request.team_b:
+            player = connection.execute("SELECT player_id FROM players WHERE player_id = ?",(roster_player.player_id,)).fetchone()
+            if player is None:
+                raise HTTPException(status_code=404,detail=f"Player not found: {roster_player.player_id}")
+        result = analyze_projected_matchup(
+            connection,
+            team_a,
+            team_b,
+            player_ids,
+            request.season,
+            request.start_date.isoformat(),
+            request.end_date.isoformat(),
+            request.lineup_slots,
+            str(model_path),
+            model_type,
+            as_of_date=cutoff.isoformat())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    finally:
+        connection.close()
+    response_a = build_weekly_lineup_response(
+        weekly_results=result["team_a"]["weekly_results"],
+        player_ids=team_a_ids,
+        lineup_slots=request.lineup_slots,
+        season=request.season,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        model=request.model,
+        as_of_date=cutoff,
+        projected_total=result["team_a"]["projected_total"])
+    response_b = build_weekly_lineup_response(
+        weekly_results=result["team_b"]["weekly_results"],
+        player_ids=team_b_ids,
+        lineup_slots=request.lineup_slots,
+        season=request.season,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        model=request.model,
+        as_of_date=cutoff,
+        projected_total=result["team_b"]["projected_total"])
+    return MatchupResponse(
+        season=request.season,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        model=request.model,
+        as_of_date=cutoff,
+        team_a=response_a,
+        team_b=response_b,
+        projected_winner=result["projected_winner"],
+        point_diff=result["point_diff"])

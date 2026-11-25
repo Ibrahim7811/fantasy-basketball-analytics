@@ -445,3 +445,195 @@ def test_weekly_lineup_endpoint_closes_connection_after_unexpected_failure(weekl
     with pytest.raises(RuntimeError, match="Unexpected optimization failure"):
         source["client"].post("/lineups/weekly", json=weekly_lineup_body)
     source["connection"].close.assert_called_once_with()
+
+@pytest.fixture
+def matchup_body(weekly_lineup_body):
+    return {
+        "team_a": [weekly_lineup_body["players"][0]],
+        "team_b": [weekly_lineup_body["players"][1]],
+        "season": "2025-26",
+        "start_date": "2026-02-03",
+        "end_date": "2026-02-05",
+        "lineup_slots": ["PG", "C1", "SG"]
+    }
+
+@pytest.fixture
+def matchup_api(prediction_api, monkeypatch):
+    curry_first = Player("Stephen Curry", ["PG"], 40.0, ["2026-02-03"], "GSW")
+    curry_last = Player("Stephen Curry", ["PG"], 42.5, ["2026-02-05"], "GSW")
+    jokic = Player("Nikola Jokic", ["C"], 57.5, ["2026-02-05"], "DEN")
+    result = {
+        "team_a": {
+            "weekly_results": {
+                "2026-02-05": {"lineup": {"PG": curry_last}, "projected_points": 42.5},
+                "2026-02-04": {"lineup": {}, "projected_points": 0.0},
+                "2026-02-03": {"lineup": {"PG": curry_first}, "projected_points": 40.0}},
+            "projected_total": 82.5},
+        "team_b": {
+            "weekly_results": {
+                "2026-02-05": {"lineup": {"C1": jokic}, "projected_points": 57.5},
+                "2026-02-04": {"lineup": {}, "projected_points": 0.0},
+                "2026-02-03": {"lineup": {}, "projected_points": 0.0}},
+            "projected_total": 57.5},
+        "projected_winner": "Team A",
+        "point_diff": 25.0}
+    analyzer = Mock(return_value=result)
+    monkeypatch.setattr(api_module, "analyze_projected_matchup", analyzer)
+    return {**prediction_api, "analyzer": analyzer}
+
+@pytest.mark.parametrize("model", ["linear_regression", "random_forest", "pytorch"])
+@pytest.mark.parametrize("cutoff", [None, "2026-02-01"])
+def test_matchup_endpoint_returns_teams_and_forwards_shared_configuration(matchup_api, matchup_body, model, cutoff):
+    source = matchup_api
+    payload = {**matchup_body, "model": model}
+    if cutoff is not None:
+        payload["as_of_date"] = cutoff
+    response = source["client"].post("/matchups", json=payload)
+    effective_cutoff = cutoff or "2026-02-03"
+    assert response.status_code == 200
+    result = response.json()
+    assert result["season"] == "2025-26"
+    assert result["start_date"] == "2026-02-03"
+    assert result["end_date"] == "2026-02-05"
+    assert result["model"] == model
+    assert result["as_of_date"] == effective_cutoff
+    assert result["projected_winner"] == "Team A"
+    assert result["point_diff"] == pytest.approx(25.0)
+    assert result["team_a"]["projected_total"] == pytest.approx(82.5)
+    assert result["team_b"]["projected_total"] == pytest.approx(57.5)
+    for team_key in ("team_a", "team_b"):
+        team = result[team_key]
+        assert team["season"] == "2025-26"
+        assert team["start_date"] == "2026-02-03"
+        assert team["end_date"] == "2026-02-05"
+        assert team["model"] == model
+        assert team["as_of_date"] == effective_cutoff
+        assert [day["game_date"] for day in team["daily_results"]] == ["2026-02-03", "2026-02-04", "2026-02-05"]
+        assert sum(day["projected_total"] for day in team["daily_results"]) == pytest.approx(team["projected_total"])
+        for day in team["daily_results"]:
+            assert day["model"] == model
+            assert day["as_of_date"] == effective_cutoff
+            assert set(day["lineup"]) == {"PG", "C1", "SG"}
+        assert team["daily_results"][1]["lineup"] == {"PG": None, "C1": None, "SG": None}
+    selected_a = result["team_a"]["daily_results"][0]["lineup"]["PG"]
+    selected_b = result["team_b"]["daily_results"][2]["lineup"]["C1"]
+    assert selected_a["player_id"] == 201939
+    assert selected_a["name"] == "Stephen Curry"
+    assert selected_a["projected_fp"] == 40.0
+    assert selected_b["player_id"] == 203999
+    assert selected_b["name"] == "Nikola Jokic"
+    assert selected_b["projected_fp"] == 57.5
+    source["analyzer"].assert_called_once()
+    args = source["analyzer"].call_args.args
+    assert args[0] is source["connection"]
+    team_a, team_b = args[1:3]
+    assert len(team_a) == len(team_b) == 1
+    assert team_a[0]._name == "Stephen Curry"
+    assert team_b[0]._name == "Nikola Jokic"
+    assert team_a[0]._positions == ["PG"]
+    assert team_b[0]._positions == ["C"]
+    assert team_a[0]._schedule == ["2026-02-03", "2026-02-05"]
+    assert team_b[0]._schedule == ["2026-02-05"]
+    assert team_a[0]._projected_points == team_b[0]._projected_points == 0.0
+    assert args[3] == {"Stephen Curry": 201939, "Nikola Jokic": 203999}
+    model_path, model_type = source["configs"][model]
+    assert args[4:] == (
+        "2025-26",
+        "2026-02-03",
+        "2026-02-05",
+        ["PG", "C1", "SG"],
+        str(model_path),
+        model_type)
+    assert source["analyzer"].call_args.kwargs == {"as_of_date": effective_cutoff}
+    assert [item.args[1] for item in source["connection"].execute.call_args_list] == [(201939,), (203999,)]
+    source["connector"].assert_called_once_with(str(source["db_path"]))
+    source["connection"].close.assert_called_once_with()
+
+def test_matchup_endpoint_defaults_to_linear_regression(matchup_api, matchup_body):
+    source = matchup_api
+    response = source["client"].post("/matchups", json=matchup_body)
+    assert response.status_code == 200
+    assert response.json()["model"] == "linear_regression"
+    assert response.json()["as_of_date"] == "2026-02-03"
+
+@pytest.mark.parametrize("points_a, points_b, winner", [
+    (40.0, 60.0, "Team B"),
+    (50.0, 50.0, "Tie")
+])
+def test_matchup_endpoint_returns_other_winner_outcomes(matchup_api, matchup_body, points_a, points_b, winner):
+    source = matchup_api
+    result = source["analyzer"].return_value
+    for team_key, points in (("team_a", points_a), ("team_b", points_b)):
+        team = result[team_key]
+        team["projected_total"] = points
+        active_days = [day for day in team["weekly_results"].values() if day["lineup"]]
+        for day in active_days:
+            day["projected_points"] = points / len(active_days)
+            for player in day["lineup"].values():
+                player._projected_points = day["projected_points"]
+    result["projected_winner"] = winner
+    result["point_diff"] = points_a - points_b
+    response = source["client"].post("/matchups", json=matchup_body)
+    assert response.status_code == 200
+    assert response.json()["projected_winner"] == winner
+    assert response.json()["point_diff"] == pytest.approx(points_a - points_b)
+
+@pytest.mark.parametrize("problem", ["overlapping_player", "empty_team", "late_cutoff", "duplicate_slots"])
+def test_matchup_endpoint_rejects_invalid_requests_before_database_access(matchup_api, matchup_body, problem):
+    source = matchup_api
+    if problem == "overlapping_player":
+        matchup_body["team_b"][0]["player_id"] = matchup_body["team_a"][0]["player_id"]
+    elif problem == "empty_team":
+        matchup_body["team_b"] = []
+    elif problem == "late_cutoff":
+        matchup_body["as_of_date"] = "2026-02-04"
+    else:
+        matchup_body["lineup_slots"] = ["PG", "PG"]
+    response = source["client"].post("/matchups", json=matchup_body)
+    assert response.status_code == 422
+    source["connector"].assert_not_called()
+    source["analyzer"].assert_not_called()
+
+@pytest.mark.parametrize("missing_resource", ["database", "model"])
+def test_matchup_endpoint_returns_503_for_missing_resources(matchup_api, matchup_body, missing_resource):
+    source = matchup_api
+    if missing_resource == "database":
+        source["db_path"].unlink()
+    else:
+        source["configs"]["linear_regression"][0].unlink()
+    response = source["client"].post("/matchups", json=matchup_body)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Prediction service data or model is unavailable"}
+    source["connector"].assert_not_called()
+    source["analyzer"].assert_not_called()
+
+@pytest.mark.parametrize("missing_team", ["team_a", "team_b"])
+def test_matchup_endpoint_returns_404_for_unknown_player_on_either_team(matchup_api, matchup_body, missing_team):
+    source = matchup_api
+    if missing_team == "team_a":
+        source["connection"].execute.return_value.fetchone.side_effect = [None]
+        missing_id = 201939
+    else:
+        source["connection"].execute.return_value.fetchone.side_effect = [(201939,), None]
+        missing_id = 203999
+    response = source["client"].post("/matchups", json=matchup_body)
+    assert response.status_code == 404
+    assert response.json() == {"detail": f"Player not found: {missing_id}"}
+    source["analyzer"].assert_not_called()
+    source["connection"].close.assert_called_once_with()
+
+def test_matchup_endpoint_returns_422_for_inference_error(matchup_api, matchup_body):
+    source = matchup_api
+    message = "No completed games before prediction date"
+    source["analyzer"].side_effect = ValueError(message)
+    response = source["client"].post("/matchups", json=matchup_body)
+    assert response.status_code == 422
+    assert response.json() == {"detail": message}
+    source["connection"].close.assert_called_once_with()
+
+def test_matchup_endpoint_closes_connection_after_unexpected_failure(matchup_api, matchup_body):
+    source = matchup_api
+    source["analyzer"].side_effect = RuntimeError("Unexpected matchup failure")
+    with pytest.raises(RuntimeError, match="Unexpected matchup failure"):
+        source["client"].post("/matchups", json=matchup_body)
+    source["connection"].close.assert_called_once_with()
