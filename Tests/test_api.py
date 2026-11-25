@@ -5,6 +5,7 @@ import pytest
 from fantasy_basketball import api as api_module
 from fantasy_basketball.player_class import Player
 from datetime import date
+import psycopg
 
 def test_health_endpoint_returns_ok():
     with TestClient(app) as client:
@@ -637,3 +638,42 @@ def test_matchup_endpoint_closes_connection_after_unexpected_failure(matchup_api
     with pytest.raises(RuntimeError, match="Unexpected matchup failure"):
         source["client"].post("/matchups", json=matchup_body)
     source["connection"].close.assert_called_once_with()
+
+def test_get_api_connection_uses_postgres_when_configured(monkeypatch):
+    database_url = "postgresql://user:password@localhost/fantasy_test"
+    connection = Mock()
+    postgres_connector = Mock(return_value=connection)
+    sqlite_connector = Mock()
+    monkeypatch.setattr(api_module, "DATABASE_URL", database_url)
+    monkeypatch.setattr(api_module, "get_postgres_connection", postgres_connector)
+    monkeypatch.setattr(api_module, "get_connection", sqlite_connector)
+    result = api_module.get_api_connection()
+    assert result is connection
+    postgres_connector.assert_called_once_with(database_url)
+    sqlite_connector.assert_not_called()
+
+def test_get_api_connection_uses_sqlite_without_database_url(monkeypatch, tmp_path):
+    database_path = tmp_path / "fantasy.db"
+    connection = Mock()
+    sqlite_connector = Mock(return_value=connection)
+    postgres_connector = Mock()
+    monkeypatch.setattr(api_module, "DATABASE_URL", "")
+    monkeypatch.setattr(api_module, "DB_PATH", database_path)
+    monkeypatch.setattr(api_module, "get_connection", sqlite_connector)
+    monkeypatch.setattr(api_module, "get_postgres_connection", postgres_connector)
+    result = api_module.get_api_connection()
+    assert result is connection
+    sqlite_connector.assert_called_once_with(str(database_path))
+    postgres_connector.assert_not_called()
+
+def test_get_api_connection_returns_503_when_postgres_is_unavailable(monkeypatch):
+    postgres_connector = Mock(side_effect=psycopg.OperationalError("Private connection details"))
+    sqlite_connector = Mock()
+    monkeypatch.setattr(api_module, "DATABASE_URL", "postgresql://localhost/fantasy_test")
+    monkeypatch.setattr(api_module, "get_postgres_connection", postgres_connector)
+    monkeypatch.setattr(api_module, "get_connection", sqlite_connector)
+    with pytest.raises(api_module.HTTPException) as caught:
+        api_module.get_api_connection()
+    assert caught.value.status_code == 503
+    assert caught.value.detail == "Database service is unavailable"
+    sqlite_connector.assert_not_called()

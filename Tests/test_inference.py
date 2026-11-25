@@ -20,6 +20,8 @@ from fantasy_basketball.model_persistence import save_sklearn_model, save_neural
 from sklearn.preprocessing import StandardScaler
 from fantasy_basketball.torch_model import FantasyPointsNet
 from fantasy_basketball.player_class import Player
+import sqlite3
+import psycopg
 
 ALL_FEATURES = [
     "FP_AVG_5",
@@ -804,3 +806,36 @@ def test_optimize_projected_week_propagates_prediction_failure(monkeypatch):
             None, [player], {"Test Player": 101}, "2025-26",
             "2026-02-01", "2026-02-03", ["PG"], "unused.pkl")
     assert player._projected_points == 10.0
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_stored_prediction_routes_to_correct_database(stored_prediction_source, monkeypatch, backend):
+    source = stored_prediction_source
+    connection_type = psycopg.Connection if backend == "postgres" else sqlite3.Connection
+    connection = Mock(spec=connection_type)
+    postgres_loader = Mock(return_value=source["logs"])
+    monkeypatch.setattr(inference, "load_postgres_player_game_logs", postgres_loader)
+    original = source["logs"].copy(deep=True)
+    projection = predict_stored_player_next_game(connection, 10, "2025-26", "2025-11-05", "saved_model", model_type=source["model_type"])
+    assert projection == pytest.approx(77.25)
+    if backend == "postgres":
+        postgres_loader.assert_called_once_with(connection, 10, "2025-26")
+        source["log_fetcher"].assert_not_called()
+    else:
+        source["log_fetcher"].assert_called_once_with(connection, 10, "2025-26")
+        postgres_loader.assert_not_called()
+    expected_features = pd.DataFrame([{
+        "REST_DAYS": 1,
+        "MIN_AVG_10": 30.0,
+        "FP_AVG_5": 33.0,
+        "MIN_AVG_5": 30.0,
+        "FP_AVG_10": 33.0}])
+    if source["model_type"] == "sklearn":
+        source["model"].predict.assert_called_once()
+        actual_features = source["model"].predict.call_args.args[0]
+        source["neural_predictor"].assert_not_called()
+    else:
+        source["neural_predictor"].assert_called_once()
+        actual_features = source["neural_predictor"].call_args.args[1]
+        source["model"].predict.assert_not_called()
+    pd.testing.assert_frame_equal(actual_features, expected_features)
+    pd.testing.assert_frame_equal(source["logs"], original)

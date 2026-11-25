@@ -1,6 +1,7 @@
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fantasy_basketball.database import get_connection
+from fantasy_basketball.postgres_database import get_postgres_connection
 from fantasy_basketball.inference import predict_stored_player_next_game, optimize_projected_day, optimize_projected_week
 from fantasy_basketball.schemas import (
     PredictionRequest,
@@ -17,16 +18,32 @@ from fantasy_basketball.player_class import Player
 from datetime import date
 from fantasy_basketball.matchup import analyze_projected_matchup
 import os
+import sqlite3
+import psycopg
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATABASE_URL = os.environ.get("FANTASY_DATABASE_URL", "").strip()
 DB_PATH = Path(
-    os.environ.get("FANTASY_DB_PATH",str(PROJECT_ROOT / "data" / "fantasy_basketball.db"))).expanduser().resolve()
+    os.environ.get("FANTASY_DB_PATH", str(PROJECT_ROOT / "data" / "fantasy_basketball.db"))).expanduser().resolve()
 MODEL_DIR = Path(
-    os.environ.get("FANTASY_MODEL_DIR",str(PROJECT_ROOT / "models" / "32_players_3_features"))).expanduser().resolve()
+    os.environ.get("FANTASY_MODEL_DIR", str(PROJECT_ROOT / "models" / "32_players_3_features"))).expanduser().resolve()
 MODEL_CONFIGS = {
     "linear_regression": (MODEL_DIR / "linear_regression.pkl", "sklearn"),
     "random_forest": (MODEL_DIR / "random_forest.pkl", "sklearn"),
     "pytorch": (MODEL_DIR / "neural_network.pt", "pytorch")}
+
+def get_api_connection() -> sqlite3.Connection | psycopg.Connection:
+    if DATABASE_URL:
+        try:
+            return get_postgres_connection(DATABASE_URL)
+        except psycopg.OperationalError as error:
+            raise HTTPException(status_code=503, detail="Database service is unavailable") from error
+    return get_connection(str(DB_PATH))
+
+def find_stored_player(connection: sqlite3.Connection | psycopg.Connection, player_id: int) -> tuple[int] | None:
+    placeholder = "%s" if isinstance(connection, psycopg.Connection) else "?"
+    query = f"SELECT player_id FROM players WHERE player_id = {placeholder}"
+    return connection.execute(query, (player_id,)).fetchone()
 
 def build_api_roster(roster: list[RosterPlayerRequest]) -> tuple[list[Player], dict[str, int]]:
     players = []
@@ -50,7 +67,7 @@ def build_daily_lineup_response(
     game_date: date,
     model: str,
     as_of_date: date,
-    projected_total: float
+    projected_total: float,
 ) -> DailyLineupResponse:
     response_lineup = {}
     for slot in lineup_slots:
@@ -105,6 +122,7 @@ def build_weekly_lineup_response(
         projected_total=projected_total)
 
 app = FastAPI(title="Fantasy Basketball Analyzer")
+
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
@@ -112,14 +130,14 @@ def health_check() -> dict[str, str]:
 @app.post("/predict", response_model=PredictionResponse)
 def predict(request: PredictionRequest) -> PredictionResponse:
     model_path, model_type = MODEL_CONFIGS[request.model]
-    if not DB_PATH.is_file() or not model_path.is_file():
+    if (not DATABASE_URL and not DB_PATH.is_file()) or not model_path.is_file():
         raise HTTPException(
             status_code=503,
             detail="Prediction service data or model is unavailable")
     cutoff = request.as_of_date or request.game_date
-    connection = get_connection(str(DB_PATH))
+    connection = get_api_connection()
     try:
-        player = connection.execute("SELECT player_id FROM players WHERE player_id = ?",(request.player_id,)).fetchone()
+        player = find_stored_player(connection, request.player_id)
         if player is None:
             raise HTTPException(status_code=404, detail="Player not found")
         projection = predict_stored_player_next_game(
@@ -145,14 +163,14 @@ def predict(request: PredictionRequest) -> PredictionResponse:
 @app.post("/lineups/daily", response_model=DailyLineupResponse)
 def optimize_daily_lineup(request: DailyLineupRequest) -> DailyLineupResponse:
     model_path, model_type = MODEL_CONFIGS[request.model]
-    if not DB_PATH.is_file() or not model_path.is_file():
-        raise HTTPException(status_code=503,detail="Prediction service data or model is unavailable")
+    if (not DATABASE_URL and not DB_PATH.is_file()) or not model_path.is_file():
+        raise HTTPException(status_code=503, detail="Prediction service data or model is unavailable")
     cutoff = request.as_of_date or request.game_date
     players, player_ids = build_api_roster(request.players)
-    connection = get_connection(str(DB_PATH))
+    connection = get_api_connection()
     try:
         for roster_player in request.players:
-            player = connection.execute("SELECT player_id FROM players WHERE player_id = ?",(roster_player.player_id,)).fetchone()
+            player = find_stored_player(connection, roster_player.player_id)
             if player is None:
                 raise HTTPException(
                     status_code=404,
@@ -184,16 +202,16 @@ def optimize_daily_lineup(request: DailyLineupRequest) -> DailyLineupResponse:
 @app.post("/lineups/weekly", response_model=WeeklyLineupResponse)
 def optimize_weekly_lineup(request: WeeklyLineupRequest) -> WeeklyLineupResponse:
     model_path, model_type = MODEL_CONFIGS[request.model]
-    if not DB_PATH.is_file() or not model_path.is_file():
-        raise HTTPException(status_code=503,detail="Prediction service data or model is unavailable")
+    if (not DATABASE_URL and not DB_PATH.is_file()) or not model_path.is_file():
+        raise HTTPException(status_code=503, detail="Prediction service data or model is unavailable")
     cutoff = request.as_of_date or request.start_date
     players, player_ids = build_api_roster(request.players)
-    connection = get_connection(str(DB_PATH))
+    connection = get_api_connection()
     try:
         for roster_player in request.players:
-            player = connection.execute("SELECT player_id FROM players WHERE player_id = ?",(roster_player.player_id,)).fetchone()
+            player = find_stored_player(connection, roster_player.player_id)
             if player is None:
-                raise HTTPException(status_code=404,detail=f"Player not found: {roster_player.player_id}")
+                raise HTTPException(status_code=404, detail=f"Player not found: {roster_player.player_id}")
         weekly_results, projected_total = optimize_projected_week(
             connection,
             players,
@@ -223,18 +241,18 @@ def optimize_weekly_lineup(request: WeeklyLineupRequest) -> WeeklyLineupResponse
 @app.post("/matchups", response_model=MatchupResponse)
 def analyze_matchup_endpoint(request: MatchupRequest) -> MatchupResponse:
     model_path, model_type = MODEL_CONFIGS[request.model]
-    if not DB_PATH.is_file() or not model_path.is_file():
-        raise HTTPException(status_code=503,detail="Prediction service data or model is unavailable")
+    if (not DATABASE_URL and not DB_PATH.is_file()) or not model_path.is_file():
+        raise HTTPException(status_code=503, detail="Prediction service data or model is unavailable")
     cutoff = request.as_of_date or request.start_date
     team_a, team_a_ids = build_api_roster(request.team_a)
     team_b, team_b_ids = build_api_roster(request.team_b)
     player_ids = team_a_ids | team_b_ids
-    connection = get_connection(str(DB_PATH))
+    connection = get_api_connection()
     try:
         for roster_player in request.team_a + request.team_b:
-            player = connection.execute("SELECT player_id FROM players WHERE player_id = ?",(roster_player.player_id,)).fetchone()
+            player = find_stored_player(connection, roster_player.player_id)
             if player is None:
-                raise HTTPException(status_code=404,detail=f"Player not found: {roster_player.player_id}")
+                raise HTTPException(status_code=404, detail=f"Player not found: {roster_player.player_id}")
         result = analyze_projected_matchup(
             connection,
             team_a,

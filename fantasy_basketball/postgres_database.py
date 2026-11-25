@@ -1,4 +1,5 @@
 import psycopg
+import pandas as pd
 
 def get_postgres_connection(database_url: str) -> psycopg.Connection:
     return psycopg.connect(database_url, connect_timeout=10)
@@ -42,3 +43,30 @@ def initialize_postgres_database(connection: psycopg.Connection) -> None:
             PRIMARY KEY (game_id, player_id)
         )
     """)
+
+def load_postgres_player_game_logs(connection: psycopg.Connection, player_id: int, season: str) -> pd.DataFrame:
+    query = """
+        SELECT
+            s.game_id AS "GAME_ID",
+            s.player_id AS "PLAYER_ID",
+            s.team_id AS "TEAM_ID",
+            g.date AS "GAME_DATE",
+            s.minutes AS "MIN",
+            s.pts AS "PTS",
+            s.reb AS "REB",
+            s.ast AS "AST",
+            s.stl AS "STL",
+            s.blk AS "BLK",
+            s.tov AS "TOV"
+        FROM player_game_stats AS s
+        JOIN games AS g ON g.game_id = s.game_id
+        WHERE s.player_id = %s AND g.season = %s
+        ORDER BY g.date, g.game_id
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(query, (player_id, season))
+        rows = cursor.fetchall()
+        columns = [column.name for column in cursor.description]
+    logs = pd.DataFrame(rows, columns=columns)
+    logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"])
+    return logs

@@ -7,6 +7,8 @@ from fantasy_basketball.database import load_player_game_logs
 from fantasy_basketball.data_processing import prepare_game_logs
 from fantasy_basketball.player_class import Player
 from fantasy_basketball.lineup import build_optimal_lineup, lineup_total
+import psycopg
+from fantasy_basketball.postgres_database import load_postgres_player_game_logs
 
 def build_next_game_features(prepared_df: pd.DataFrame, game_date: str, feature_columns: list[str]) -> pd.DataFrame:
     if prepared_df.empty:
@@ -60,7 +62,7 @@ def predict_next_game_neural_network(prepared_df: pd.DataFrame, game_date: str, 
     return projection
 
 def predict_stored_player_next_game(
-    connection: sqlite3.Connection,
+    connection: sqlite3.Connection | psycopg.Connection,
     player_id: int,
     season: str,
     game_date: str,
@@ -75,7 +77,10 @@ def predict_stored_player_next_game(
         bundle = load_sklearn_model(model_path)
     else:
         bundle = load_neural_network(model_path)
-    logs = load_player_game_logs(connection, player_id, season)
+    if isinstance(connection, psycopg.Connection):
+        logs = load_postgres_player_game_logs(connection, player_id, season)
+    else:
+        logs = load_player_game_logs(connection, player_id, season)
     upcoming_date = pd.Timestamp(game_date)
     if pd.isna(upcoming_date):
         raise ValueError("Upcoming game date cannot be missing")
@@ -116,7 +121,7 @@ def predict_stored_player_next_game(
     return projection
 
 def project_roster_for_date(
-    connection: sqlite3.Connection,
+    connection: sqlite3.Connection | psycopg.Connection,
     players: list[Player],
     player_ids: dict[str, int],
     season: str,
@@ -150,7 +155,7 @@ def project_roster_for_date(
     return projected_players
 
 def optimize_projected_day(
-    connection: sqlite3.Connection,
+    connection: sqlite3.Connection | psycopg.Connection,
     players: list[Player],
     player_ids: dict[str, int],
     season: str,
@@ -187,7 +192,7 @@ def calculate_projected_rest_days(last_completed_date: str, game_date: str, sche
     return (upcoming - previous_game).days - 1
 
 def optimize_projected_week(
-    connection: sqlite3.Connection,
+    connection: sqlite3.Connection | psycopg.Connection,
     players: list[Player],
     player_ids: dict[str, int],
     season: str,

@@ -5,15 +5,13 @@ services:
     ports:
       - "127.0.0.1:8001:8000"
     environment:
-      FANTASY_DB_PATH: /data/fantasy_basketball.db
+      FANTASY_DATABASE_URL: postgresql://fantasy_app@postgres:5432/fantasy_basketball
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       FANTASY_MODEL_DIR: /models
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
-      - type: bind
-        source: ./data
-        target: /data
-        read_only: true
-        bind:
-          create_host_path: false
       - type: bind
         source: ./models/32_players_3_features
         target: /models
