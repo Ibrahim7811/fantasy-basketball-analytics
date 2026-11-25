@@ -26,3 +26,21 @@ services:
       timeout: 10s
       start_period: 30s
       retries: 3
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: fantasy_basketball
+      POSTGRES_USER: fantasy_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fantasy_app -d fantasy_basketball"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+volumes:
+  postgres_data:

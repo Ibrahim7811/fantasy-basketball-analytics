@@ -8,3 +8,4 @@ Screenshot *.png
 Misc/*.mov
 Misc/*.png
 data/fantasy_basketball.db*
+.env
