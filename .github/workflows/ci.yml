@@ -12,6 +12,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: fantasy_test
+          POSTGRES_USER: fantasy_app
+          POSTGRES_PASSWORD: ci_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fantasy_app -d fantasy_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -29,8 +44,10 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip check
 
-      - name: Run tests
-        run: python -m pytest -q --tb=short
+      - name: Run tests including PostgreSQL integration
+        env:
+          TEST_POSTGRES_URL: postgresql://fantasy_app:ci_test_password@127.0.0.1:5432/fantasy_test
+        run: python -m pytest -q --tb=short -rs
 
       - name: Build Docker image
         run: docker build -t fantasy-basketball-api:ci .
