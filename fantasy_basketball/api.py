@@ -16,11 +16,13 @@ from fantasy_basketball.schemas import (
 from fantasy_basketball.player_class import Player
 from datetime import date
 from fantasy_basketball.matchup import analyze_projected_matchup
-
+import os
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "fantasy_basketball.db"
-MODEL_DIR = PROJECT_ROOT / "models" / "32_players_3_features"
+DB_PATH = Path(
+    os.environ.get("FANTASY_DB_PATH",str(PROJECT_ROOT / "data" / "fantasy_basketball.db"))).expanduser().resolve()
+MODEL_DIR = Path(
+    os.environ.get("FANTASY_MODEL_DIR",str(PROJECT_ROOT / "models" / "32_players_3_features"))).expanduser().resolve()
 MODEL_CONFIGS = {
     "linear_regression": (MODEL_DIR / "linear_regression.pkl", "sklearn"),
     "random_forest": (MODEL_DIR / "random_forest.pkl", "sklearn"),
