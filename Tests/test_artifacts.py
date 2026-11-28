@@ -1,8 +1,8 @@
 import hashlib
 import pytest
-from fantasy_basketball.artifacts import build_model_manifest, package_models
+from fantasy_basketball.artifacts import build_model_manifest, package_models, install_models
 import json
-from zipfile import ZipFile
+from zipfile import ZipFile, BadZipFile
 
 @pytest.fixture
 def model_files(tmp_path):
@@ -139,3 +139,138 @@ def test_package_models_rejects_changes_after_manifest_creation(model_files, tmp
     with pytest.raises(ValueError, match="Model changed during packaging"):
         package_models(str(directory), str(destination))
     assert not destination.exists()
+
+@pytest.fixture
+def model_package(model_files, tmp_path):
+    directory, contents = model_files
+    package_path = tmp_path / "models.zip"
+    package_models(str(directory), str(package_path))
+    return package_path, contents
+
+def test_install_models_verifies_and_installs_package(model_package, tmp_path):
+    package_path, contents = model_package
+    destination = tmp_path / "installed" / "models"
+    result = install_models(str(package_path), str(destination))
+    assert result == str(destination)
+    assert {path.name for path in destination.iterdir()} == {*contents, "manifest.json"}
+    manifest = json.loads((destination / "manifest.json").read_text(encoding = "utf-8"))
+    for filename, content in contents.items():
+        installed = (destination / filename).read_bytes()
+        assert installed == content
+        assert manifest["files"][filename]["size_bytes"] == len(installed)
+        assert manifest["files"][filename]["sha256"] == hashlib.sha256(installed).hexdigest()
+
+def test_install_models_preserves_package(model_package, tmp_path):
+    package_path, _ = model_package
+    original = package_path.read_bytes()
+    install_models(str(package_path), str(tmp_path / "installed"))
+    assert package_path.read_bytes() == original
+
+def test_install_models_refuses_existing_destination(model_package, tmp_path):
+    package_path, _ = model_package
+    destination = tmp_path / "existing"
+    destination.mkdir()
+    marker = destination / "keep.txt"
+    marker.write_text("preserve", encoding = "utf-8")
+    with pytest.raises(FileExistsError, match = "already exists"):
+        install_models(str(package_path), str(destination))
+    assert marker.read_text(encoding = "utf-8") == "preserve"
+    assert {path.name for path in destination.iterdir()} == {"keep.txt"}
+
+@pytest.mark.parametrize("case", ["changed_content", "wrong_size", "wrong_checksum", "empty_model"])
+def test_install_models_rejects_invalid_model_contents(model_package, tmp_path, case):
+    package_path, _ = model_package
+    with ZipFile(package_path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    manifest = json.loads(entries["manifest.json"])
+    filename = "linear_regression.pkl"
+    if case == "changed_content":
+        entries[filename] = b"changed model"
+    elif case == "wrong_size":
+        manifest["files"][filename]["size_bytes"] += 1
+    elif case == "wrong_checksum":
+        manifest["files"][filename]["sha256"] = "0" * 64
+    else:
+        entries[filename] = b""
+    entries["manifest.json"] = json.dumps(manifest).encode("utf-8")
+    invalid_package = tmp_path / "invalid.zip"
+    with ZipFile(invalid_package, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    destination = tmp_path / "release" / "models"
+    with pytest.raises(ValueError, match = "verification failed|empty"):
+        install_models(str(invalid_package), str(destination))
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+@pytest.mark.parametrize("case", ["missing_model", "missing_manifest", "extra_file", "unsafe_path"])
+def test_install_models_rejects_unexpected_archive_entries(model_package, tmp_path, case):
+    package_path, _ = model_package
+    with ZipFile(package_path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    if case == "missing_model":
+        del entries["linear_regression.pkl"]
+    elif case == "missing_manifest":
+        del entries["manifest.json"]
+    elif case == "extra_file":
+        entries["notes.txt"] = b"extra"
+    else:
+        entries["../escaped.txt"] = entries.pop("linear_regression.pkl")
+    invalid_package = tmp_path / "invalid.zip"
+    with ZipFile(invalid_package, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    destination = tmp_path / "release" / "models"
+    with pytest.raises(ValueError, match = "exactly three models and a manifest"):
+        install_models(str(invalid_package), str(destination))
+    assert not destination.exists()
+    assert not (tmp_path / "escaped.txt").exists()
+
+@pytest.mark.parametrize("case", ["invalid_json", "not_dictionary", "unsupported_version", "missing_files", "wrong_filenames", "invalid_entry"])
+def test_install_models_rejects_invalid_manifest(model_package, tmp_path, case):
+    package_path, _ = model_package
+    with ZipFile(package_path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    manifest = json.loads(entries["manifest.json"])
+    if case == "invalid_json":
+        entries["manifest.json"] = b"not JSON"
+    else:
+        if case == "not_dictionary":
+            manifest = []
+        elif case == "unsupported_version":
+            manifest["format_version"] = 99
+        elif case == "missing_files":
+            del manifest["files"]
+        elif case == "wrong_filenames":
+            manifest["files"]["unexpected.pkl"] = manifest["files"].pop("linear_regression.pkl")
+        else:
+            manifest["files"]["linear_regression.pkl"] = "invalid"
+        entries["manifest.json"] = json.dumps(manifest).encode("utf-8")
+    invalid_package = tmp_path / "invalid.zip"
+    with ZipFile(invalid_package, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    destination = tmp_path / "release" / "models"
+    with pytest.raises(ValueError):
+        install_models(str(invalid_package), str(destination))
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+def test_install_models_rejects_non_zip_file(tmp_path):
+    package_path = tmp_path / "invalid.zip"
+    package_path.write_bytes(b"not a ZIP archive")
+    destination = tmp_path / "installed"
+    with pytest.raises(BadZipFile):
+        install_models(str(package_path), str(destination))
+    assert not destination.exists()
+
+def test_install_models_cleans_up_after_write_failure(model_package, tmp_path, monkeypatch):
+    package_path, _ = model_package
+    destination = tmp_path / "release" / "models"
+    def fail_write(self, content):
+        raise OSError("Simulated write failure")
+    monkeypatch.setattr(type(destination), "write_bytes", fail_write)
+    with pytest.raises(OSError, match = "Simulated write failure"):
+        install_models(str(package_path), str(destination))
+    assert not destination.exists()
+    assert list(destination.parent.iterdir()) == []
