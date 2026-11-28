@@ -9,3 +9,4 @@ Misc/*.mov
 Misc/*.png
 data/fantasy_basketball.db*
 .env
+artifacts/
